@@ -1,10 +1,19 @@
+# Datasets 
 **/dataset/
 dataset/
 
-.vscode/
-
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
 
+# Environments
+.venv
+env/
+venv/
+
+# macOS
 .DS_Store
+
+# VSCode
+.vscode/
