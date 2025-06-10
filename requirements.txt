@@ -4,12 +4,12 @@ torchvision>=0.15.0
 lightning>=2.0.0
 torchmetrics>=0.11.4
 
-# --------- conda-forge
+# --------- conda-forge --------- #
 easydict
 fastrlock
 fire
 libjpeg-turbo
-opencv  # sth wrong here
+opencv-python  # fixed: use opencv-python instead of opencv
 pandas
 pkg-config
 retrying
@@ -19,6 +19,11 @@ scipy
 scikit-learn
 tabulate
 timm
+
+# --------- EEG processing dependencies --------- #
+mne>=1.0.0        # for reading EDF files and EEG processing
+matplotlib>=3.5.0  # for spectrogram visualization
+numpy>=1.21.0     # array operations (likely already satisfied by other deps)
 
 # numba
 numba
@@ -41,6 +46,5 @@ pre-commit      # hooks for applying linters on commit
 pytest          # tests
 # sh            # for running bash commands in some tests (linux/macos only)
 
-# -------- pip
-
+# -------- pip -------- #
 treetable
