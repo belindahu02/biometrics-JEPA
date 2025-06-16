@@ -1,6 +1,8 @@
 # Datasets 
 **/dataset/
 dataset/
+**/datasets/
+datasets/
 **/spectrograms/
 
 # Byte-compiled / optimized / DLL files
