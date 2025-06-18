@@ -156,7 +156,6 @@ def build_dataset(data_path: str,
         - norm_stats: Normalization statistics, a list of [mean, std].
         - input_size: Input size, a list of [# of freq. bins, # of time frames].
     """
-
     transforms = None  # Future options: torch.nn.Sequential(*transforms) if transforms else None
     ds = SpectrogramDataset(folder=data_path, files=get_files(dataset_name), crop_frames=crop_frames,
                             tfms=transforms, norm_stats=norm_stats)

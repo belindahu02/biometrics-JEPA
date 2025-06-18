@@ -3,6 +3,8 @@
 dataset/
 **/datasets/
 datasets/
+**/data/
+data/
 **/spectrograms/
 
 # Byte-compiled / optimized / DLL files
@@ -18,5 +20,6 @@ venv/
 # macOS
 .DS_Store
 
-# VSCode
+# IDEs
 .vscode/
+.idea/
