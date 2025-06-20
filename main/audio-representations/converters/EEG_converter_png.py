@@ -277,7 +277,7 @@ def get_edf_files_from_subjects(
 if __name__ == "__main__":
     # Single file processing
     try:
-        dataset_path = "../mmi/dataset/physionet.org/files/eegmmidb/1.0.0"
+        dataset_path = "../../../mmi/dataset/physionet.org/files/eegmmidb/1.0.0"
         process_subject_folders(
             dataset_path,
             subject_pattern="S00?"  # S001-S009

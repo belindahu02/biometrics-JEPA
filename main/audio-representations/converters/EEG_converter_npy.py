@@ -368,14 +368,14 @@ def check_spectrogram_compatibility(eeg_spectrogram_path: str, audio_spectrogram
 # Example usage
 if __name__ == "__main__":
     try:
-        dataset_path = "../mmi/dataset/physionet.org/files/eegmmidb/1.0.0"
+        dataset_path = "../../../mmi/dataset/physionet.org/files/eegmmidb/1.0.0"
 
         # Process to .npy files with audio-compatible format
         process_subject_folders(
             dataset_path,
-            subject_pattern="S00?",  # S001-S009
+            subject_pattern="S001",  # S001-S009
             save_format="npy",
-            output_directory="datasets",
+            output_directory="test",
             normalize=True,  # Apply normalization
             log_scale=True  # Apply log scaling like audio
         )
