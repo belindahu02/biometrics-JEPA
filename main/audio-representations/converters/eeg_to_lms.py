@@ -20,6 +20,8 @@ from tqdm import tqdm
 import nnAudio.features
 import warnings
 from scipy import signal
+import os
+import csv
 
 warnings.simplefilter('ignore')
 
@@ -37,22 +39,30 @@ class EEG_FFT_parameters:
 
 def _converter_worker(args):
     subpathname, from_dir, to_dir, prms, to_lms, suffix, min_length, verbose = args
-    from_dir, to_dir = Path(from_dir), Path(to_dir)
+    from_dir_path_obj, to_dir_path_obj = Path(from_dir), Path(to_dir) # Use Path objects inside worker
+
+    # Reconstruct the full path to the EDF file inside the container's mounted input dir
+    # subpathname is relative to the *original* from_dir (e.g., "S072/S072R10.edf")
+    edf_input_path = from_dir_path_obj / subpathname
 
     # Create folder name from file name (without extension)
     file_stem = Path(subpathname).stem  # e.g., "S001R01" from "S001R01.edf"
-    folder_name = to_dir / file_stem
+    # Ensure the output folder structure mirrors the input structure under the mounted to_dir
+    # Example: if subpathname is "S072/S072R10.edf", folder_name will be "output_mount_point/S072/S072R10"
+    relative_output_path = Path(subpathname).parent / file_stem
+    folder_name = to_dir_path_obj / relative_output_path
+
 
     # Check if folder already exists and has files
     if folder_name.exists() and any(folder_name.glob('*.npy')):
         if verbose:
-            print(f'Folder {file_stem} already exists with files')
+            print(f'Folder {file_stem} already exists with files at {folder_name}')
         return f'{file_stem} (already exists)'
 
     # Load and convert EEG to log-mel spectrogram
     try:
         # Load EEG data
-        raw = mne.io.read_raw_edf(str(from_dir / subpathname), preload=True, verbose=False)
+        raw = mne.io.read_raw_edf(str(edf_input_path), preload=True, verbose=False)
 
         # Get EEG data and channel names
         eeg_data = raw.get_data()  # Shape: (n_channels, n_samples)
@@ -61,13 +71,14 @@ def _converter_worker(args):
         n_channels = eeg_data.shape[0]
 
         if verbose:
-            print(f'Processing {subpathname}: {n_channels} channels, {len(channel_names)} channel names')
+            print(f'Processing {edf_input_path.name}: {n_channels} channels, {len(channel_names)} channel names')
 
         # Create output folder
         folder_name.mkdir(parents=True, exist_ok=True)
 
         # Process each channel separately
         successful_channels = []
+        lms_shape = None # Initialize to store shape
         for channel_idx in range(n_channels):
             try:
                 # Get channel data
@@ -102,6 +113,7 @@ def _converter_worker(args):
 
                 # Convert to log-mel spectrogram
                 lms = to_lms(eeg_signal)
+                lms_shape = lms.shape # Update shape
 
                 # Save the spectrogram for this channel
                 channel_filename = folder_name / f"{channel_name}.npy"
@@ -115,34 +127,18 @@ def _converter_worker(args):
                 print(f'ERROR processing channel {channel_idx} in {subpathname}: {str(e)}')
                 continue
 
-        # Save channel information
-        channel_info = {
-            'original_file': subpathname,
-            'original_sfreq': orig_sfreq,
-            'target_sfreq': prms.sample_rate,
-            'n_channels': n_channels,
-            'channel_names': channel_names,
-            'successful_channels': successful_channels,
-            'spectrogram_shape': lms.shape if 'lms' in locals() else None
-        }
-
-        # Save metadata
-        # metadata_file = folder_name / "metadata.npy"
-        # np.save(metadata_file, channel_info)
-
         if verbose:
-            print(f'Saved {len(successful_channels)}/{n_channels} channels for {subpathname}')
+            print(f'Saved {len(successful_channels)}/{n_channels} channels for {edf_input_path.name}')
 
     except Exception as e:
-        print('ERROR failed to open or convert', subpathname, '-', str(e))
-        return f'{subpathname} (failed)'
+        print('ERROR failed to open or convert', edf_input_path.name, '-', str(e))
+        return f'{edf_input_path.name} (failed)'
 
     return f'{file_stem} ({len(successful_channels)}/{n_channels} channels)'
 
 
 class ToLogMelSpec:
     def __init__(self, cfg):
-        # Spectrogram extractor - same as audio converter but adapted for EEG frequency range
         self.cfg = cfg
         self.to_spec = nnAudio.features.MelSpectrogram(
             sr=cfg.sample_rate,
@@ -158,78 +154,145 @@ class ToLogMelSpec:
         )
 
     def __call__(self, signal):
-        # Convert to tensor and add batch dimension if needed
         if isinstance(signal, np.ndarray):
             signal = torch.tensor(signal, dtype=torch.float32)
 
-        # Ensure signal is 1D
         if signal.dim() > 1:
             signal = signal.squeeze()
 
-        # Compute mel spectrogram
         x = self.to_spec(signal)
-
-        # Convert to log scale (add small epsilon to avoid log(0))
         x = (x + torch.finfo(torch.float32).eps).log()
 
         return x
 
 
-def convert_eeg(from_dir, to_dir, suffix='.edf', skip=0, min_length=6.1, verbose=False) -> None:
+def convert_eeg_batch(base_from_dir, base_to_dir,
+                      start_subject_id=1, end_subject_id=109,
+                      suffix='.edf', skip=0, min_length=6.1, verbose=False) -> None:
     """
-    Convert EEG files to log-mel spectrograms, processing all channels separately.
+    Convert EEG files from a range of subjects to log-mel spectrograms.
 
     Args:
-        from_dir: Source directory containing .edf files
-        to_dir: Destination directory for .npy files (each file will create a subfolder)
+        base_from_dir: Base source directory (e.g., /workspace/input_eeg_data/physionet.org/files/eegmmidb/1.0.0/)
+        base_to_dir: Base destination directory for .npy files (e.g., /workspace/output_spectrograms)
+        start_subject_id: Starting subject ID (inclusive, e.g., 1 for S001)
+        end_subject_id: Ending subject ID (inclusive, e.g., 109 for S109)
         suffix: File extension to process (default: '.edf')
-        skip: Number of files to skip (default: 0)
+        skip: Number of files to skip per subject (default: 0)
         min_length: Minimum length in seconds (default: 6.1)
         verbose: Print detailed progress information
     """
-    from_dir = str(from_dir)
-    files = [str(f).replace(from_dir, '') for f in Path(from_dir).glob(f'**/*{suffix}')]
-    files = [f[1:] if f[0] == '/' else f for f in files]
-    files = sorted(files)
-
-    if skip > 0:
-        files = files[skip:]
-
-    if len(files) == 0:
-        print(f'No {suffix} files found in {from_dir}')
-        return
+    base_from_path = Path(base_from_dir)
+    base_to_path = Path(base_to_dir)
+    all_generated_file_paths = []
 
     prms = EEG_FFT_parameters()
     to_lms = ToLogMelSpec(prms)
 
-    print(f'Processing {len(files)} {suffix} files...')
+    print(f'Starting batch conversion for subjects S{start_subject_id:03d} to S{end_subject_id:03d}')
+    print(f'Base Input Directory: {base_from_dir}')
+    print(f'Base Output Directory: {base_to_dir}')
     print(f'Target sampling rate: {prms.sample_rate} Hz')
     print(f'Processing ALL channels separately')
     print(f'Output shape per channel: (80, time_frames)')
     print(f'Frequency range: {prms.f_min}-{prms.f_max} Hz')
 
-    # Process files
-    with Pool() as p:
-        args = [[f, from_dir, to_dir, prms, to_lms, suffix, min_length, verbose]
-                for f in files]
-        results = list(tqdm(p.imap(_converter_worker, args), total=len(args)))
 
-    successful = [r for r in results if r and 'failed' not in r]
-    print(f'Finished. Successfully processed {len(successful)}/{len(files)} files.')
+    for i in range(start_subject_id, end_subject_id + 1):
+        subject_id = f"S{i:03d}"  # Format as S001, S002, etc.
 
-    # Print summary
-    for result in results:
-        if result:
-            print(f'  {result}')
+        # Construct the full source and destination paths for the current subject
+        # Input: base_from_dir/S001/...edf
+        # Output: base_to_dir/S001/...npy
+        current_subject_from_dir = base_from_path / subject_id
+        current_subject_to_dir = base_to_path / subject_id # This creates output as base_to_dir/S001/S001RXX/channel.npy
+
+        if not current_subject_from_dir.exists():
+            print(f"WARNING: Source directory for {subject_id} not found: {current_subject_from_dir}. Skipping.")
+            continue
+
+        print(f"\n--- Processing Subject: {subject_id} ---")
+
+        # Find all EDF files for the current subject, relative to current_subject_from_dir
+        # This will yield paths like "S001R01.edf", "S001R02.edf", etc.
+        subject_edf_files = [f.relative_to(current_subject_from_dir) for f in current_subject_from_dir.glob(f'**/*{suffix}')]
+        subject_edf_files = sorted(subject_edf_files)
+
+        if skip > 0:
+            subject_edf_files = subject_edf_files[skip:]
+
+        if len(subject_edf_files) == 0:
+            print(f'No {suffix} files found for {subject_id} in {current_subject_from_dir}')
+            continue
+
+        # Prepare arguments for multiprocessing worker for this subject's files
+        # The worker needs to know the *base* mounted directories (from_dir, to_dir) to construct absolute paths
+        # correctly for the *current file*.
+        worker_args_for_subject = []
+        for f in subject_edf_files:
+            # The 'subpathname' for the worker needs to be relative to the *root of the dataset*
+            # For example, if base_from_dir is /workspace/input_eeg_data/physionet.org/files/eegmmidb/1.0.0/
+            # and current_subject_from_dir is .../S001/
+            # and f is S001R01.edf
+            # we need subpathname to be S001/S001R01.edf for the worker to find it relative to base_from_dir.
+            # However, the current worker logic assumes 'subpathname' is relative to 'from_dir'.
+            # Let's adjust the worker call slightly or how 'subpathname' is generated.
+
+            # Option 1: Pass the full path to the worker, and let the worker strip it. Simpler.
+            # No, the worker needs subpathname to calculate relative output paths.
+
+            # Option 2 (Better): Keep subpathname relative to the subject's directory.
+            # And pass the subject's specific from_dir and to_dir to the worker.
+            # This is how your original _converter_worker was designed.
+            worker_args_for_subject.append([f, str(current_subject_from_dir), str(current_subject_to_dir), prms, to_lms, suffix, min_length, verbose])
+
+
+        print(f'  Processing {len(subject_edf_files)} {suffix} files for {subject_id}...')
+
+        # Process files for this subject
+        with Pool() as p:
+            results = list(tqdm(p.imap(_converter_worker, worker_args_for_subject), total=len(worker_args_for_subject)))
+
+        # Collect paths for CSV for the current subject
+        for subpathname_relative_to_subject_dir, from_dir_worker, to_dir_worker, _, _, _, _, _ in worker_args_for_subject:
+            file_stem = Path(subpathname_relative_to_subject_dir).stem
+            # This is the path like "S001R01" which is the folder name
+            output_subfolder_name = Path(subpathname_relative_to_subject_dir).parent / file_stem
+
+            # The full path to the output folder for this file within the container
+            full_output_folder_path_in_container = Path(to_dir_worker) / output_subfolder_name
+
+            if full_output_folder_path_in_container.exists():
+                for npy_file in full_output_folder_path_in_container.glob('*.npy'):
+                    # The path added to the CSV should be relative to the *base_to_dir*
+                    # Example: S001/S001R01/EEG_Channel_Name.npy
+                    relative_path_from_base_output = npy_file.relative_to(base_to_path)
+                    all_generated_file_paths.append(relative_path_from_base_output)
+
+        successful_subject_files = [r for r in results if r and 'failed' not in r]
+        print(f'  Finished {subject_id}. Successfully processed {len(successful_subject_files)}/{len(subject_edf_files)} files.')
+        for result in results:
+            if verbose and result: # Only print detailed results if verbose is true
+                print(f'    {result}')
+
+
+    # Write to CSV after all subjects are processed
+    all_generated_file_paths.sort() # Sort all paths before writing
+
+    csv_filename = base_to_path / "files_audioset.csv"
+    try:
+        with open(csv_filename, 'w', newline='') as csvfile:
+            csv_writer = csv.writer(csvfile)
+            csv_writer.writerow(['filepath']) # Header row
+            for filepath in all_generated_file_paths:
+                csv_writer.writerow([str(filepath)]) # Write each path as a row
+        print(f"\nSuccessfully wrote ALL generated file paths to {csv_filename}")
+    except Exception as e:
+        print(f"ERROR writing to CSV file {csv_filename}: {e}")
 
 
 if __name__ == "__main__":
     mp.set_start_method('spawn', force=True)
-    # fire.Fire(convert_eeg)
-
-    for i in range(71, 109):  # 1 to 109 inclusive
-        subject_id = f"S{i:03d}"  # Format as S001, S002, etc.
-        source_path = f"/Users/belindahu/Desktop/thesis/biometrics-JEPA/mmi/dataset/physionet.org/files/eegmmidb/1.0.0/{subject_id}"
-        dest_path = f"/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/{subject_id}"
-
-        convert_eeg(source_path, dest_path)
+    # The default command will run the batch conversion
+    # Pass base_from_dir and base_to_dir from Docker mounts
+    fire.Fire(convert_eeg_batch)
