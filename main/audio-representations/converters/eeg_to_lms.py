@@ -227,7 +227,7 @@ if __name__ == "__main__":
     mp.set_start_method('spawn', force=True)
     # fire.Fire(convert_eeg)
 
-    for i in range(1, 109):  # 1 to 109 inclusive
+    for i in range(71, 109):  # 1 to 109 inclusive
         subject_id = f"S{i:03d}"  # Format as S001, S002, etc.
         source_path = f"/Users/belindahu/Desktop/thesis/biometrics-JEPA/mmi/dataset/physionet.org/files/eegmmidb/1.0.0/{subject_id}"
         dest_path = f"/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/{subject_id}"
