@@ -1,11 +1,15 @@
 """
-EEG to log-mel spectrogram (LMS) converter.
+EEG to log-mel spectrogram (LMS) converter with 20s frames and 10s overlap.
 This program converts EEG .edf files found in the source folder to log-mel spectrograms,
-then stores them in the destination folder while holding the same relative path structure.
+then creates 20-second frames with 10-second overlap from each channel's spectrogram.
+Each frame is saved as a separate .npy file.
+
 The conversion includes the following processes:
     - Multi-channel EEG processing (saves each channel separately)
     - Resampling to target sampling rate
     - Converting to a log-mel spectrogram with same dimensions as audio converter
+    - Segmenting into 20s frames with 10s overlap
+
 Example:
     python eeg_to_lms.py /your/eeg/data /your/eeg_lms_output
 """
@@ -20,7 +24,6 @@ from tqdm import tqdm
 import nnAudio.features
 import warnings
 from scipy import signal
-import os
 import csv
 
 warnings.simplefilter('ignore')
@@ -35,6 +38,44 @@ class EEG_FFT_parameters:
     n_mels = 80  # Number of mel frequency bins
     f_min = 0.5  # Lower frequency limit for EEG (Hz)
     f_max = 100  # Upper frequency limit for EEG (Hz) - typical EEG range
+
+    # Frame parameters
+    frame_duration = 20.0  # 20 seconds per frame
+    frame_overlap = 10.0   # 10 seconds overlap
+    frame_stride = frame_duration - frame_overlap  # 10 seconds stride
+
+
+def create_overlapping_frames(spectrogram, frame_duration, frame_stride, hop_size, sample_rate):
+    """
+    Create overlapping frames from a spectrogram.
+
+    Args:
+        spectrogram: Input spectrogram tensor of shape (1, n_mels, time_frames)
+        frame_duration: Duration of each frame in seconds
+        frame_stride: Stride between frames in seconds
+        hop_size: Hop size used in spectrogram computation
+        sample_rate: Original sampling rate
+
+    Returns:
+        List of spectrogram frames, each of shape (1, n_mels, frame_time_frames)
+    """
+    batch_size, n_mels, total_time_frames = spectrogram.shape
+
+    # Calculate frame dimensions in spectrogram time frames
+    frames_per_second = sample_rate / hop_size
+    frame_length_frames = int(frame_duration * frames_per_second)
+    frame_stride_frames = int(frame_stride * frames_per_second)
+
+    frames = []
+    start_frame = 0
+
+    while start_frame + frame_length_frames <= total_time_frames:
+        end_frame = start_frame + frame_length_frames
+        frame = spectrogram[:, :, start_frame:end_frame]
+        frames.append(frame)
+        start_frame += frame_stride_frames
+
+    return frames
 
 
 def _converter_worker(args):
@@ -51,7 +92,6 @@ def _converter_worker(args):
     # Example: if subpathname is "S072/S072R10.edf", folder_name will be "output_mount_point/S072/S072R10"
     relative_output_path = Path(subpathname).parent / file_stem
     folder_name = to_dir_path_obj / relative_output_path
-
 
     # Check if folder already exists and has files
     if folder_name.exists() and any(folder_name.glob('*.npy')):
@@ -78,7 +118,8 @@ def _converter_worker(args):
 
         # Process each channel separately
         successful_channels = []
-        lms_shape = None # Initialize to store shape
+        total_frames_saved = 0
+
         for channel_idx in range(n_channels):
             try:
                 # Get channel data
@@ -103,38 +144,55 @@ def _converter_worker(args):
                 # Normalize EEG signal (important for spectrogram quality)
                 eeg_signal = (eeg_signal - np.mean(eeg_signal)) / (np.std(eeg_signal) + 1e-8)
 
-                # Pad if too short
-                if min_length is not None:
-                    min_samples = int(prms.sample_rate * min_length)
-                    if len(eeg_signal) < min_samples:
-                        if verbose:
-                            print(f'Padding {subpathname} channel {channel_idx} from {len(eeg_signal)} to {min_samples} samples')
-                        eeg_signal = np.pad(eeg_signal, (0, min_samples - len(eeg_signal)))
+                # Calculate minimum length for meaningful frames
+                min_samples_for_frames = int(prms.sample_rate * prms.frame_duration)
+
+                # Pad if too short for at least one frame
+                if len(eeg_signal) < min_samples_for_frames:
+                    if verbose:
+                        print(f'Padding {subpathname} channel {channel_idx} from {len(eeg_signal)} to {min_samples_for_frames} samples for frame processing')
+                    eeg_signal = np.pad(eeg_signal, (0, min_samples_for_frames - len(eeg_signal)))
 
                 # Convert to log-mel spectrogram
                 lms = to_lms(eeg_signal)
-                lms_shape = lms.shape # Update shape
 
-                # Save the spectrogram for this channel
-                channel_filename = folder_name / f"{channel_name}.npy"
-                np.save(channel_filename, lms.numpy())
-                successful_channels.append(channel_name)
+                # Create overlapping frames
+                frames = create_overlapping_frames(
+                    lms,
+                    prms.frame_duration,
+                    prms.frame_stride,
+                    prms.hop_size,
+                    prms.sample_rate
+                )
 
-                if verbose:
-                    print(f'  Channel {channel_idx} ({channel_name}) -> {channel_filename}, shape: {lms.shape}')
+                # Save each frame as a separate file
+                channel_frames_saved = 0
+                for frame_idx, frame in enumerate(frames):
+                    frame_filename = folder_name / f"{channel_name}_frame_{frame_idx:03d}.npy"
+                    np.save(frame_filename, frame.numpy())
+                    channel_frames_saved += 1
+                    total_frames_saved += 1
+
+                if len(frames) > 0:
+                    successful_channels.append(channel_name)
+                    if verbose:
+                        print(f'  Channel {channel_idx} ({channel_name}) -> {channel_frames_saved} frames, each shape: {frames[0].shape}')
+                else:
+                    if verbose:
+                        print(f'  Channel {channel_idx} ({channel_name}) -> No frames generated (signal too short)')
 
             except Exception as e:
                 print(f'ERROR processing channel {channel_idx} in {subpathname}: {str(e)}')
                 continue
 
         if verbose:
-            print(f'Saved {len(successful_channels)}/{n_channels} channels for {edf_input_path.name}')
+            print(f'Saved {total_frames_saved} total frames from {len(successful_channels)}/{n_channels} channels for {edf_input_path.name}')
 
     except Exception as e:
         print('ERROR failed to open or convert', edf_input_path.name, '-', str(e))
         return f'{edf_input_path.name} (failed)'
 
-    return f'{file_stem} ({len(successful_channels)}/{n_channels} channels)'
+    return f'{file_stem} ({len(successful_channels)}/{n_channels} channels, {total_frames_saved} frames)'
 
 
 class ToLogMelSpec:
@@ -168,9 +226,9 @@ class ToLogMelSpec:
 
 def convert_eeg_batch(base_from_dir, base_to_dir,
                       start_subject_id=1, end_subject_id=109,
-                      suffix='.edf', skip=0, min_length=6.1, verbose=False) -> None:
+                      suffix='.edf', skip=0, min_length=20.0, verbose=False) -> None:
     """
-    Convert EEG files from a range of subjects to log-mel spectrograms.
+    Convert EEG files from a range of subjects to log-mel spectrograms with 20s frames and 10s overlap.
 
     Args:
         base_from_dir: Base source directory (e.g., /workspace/input_eeg_data/physionet.org/files/eegmmidb/1.0.0/)
@@ -179,7 +237,7 @@ def convert_eeg_batch(base_from_dir, base_to_dir,
         end_subject_id: Ending subject ID (inclusive, e.g., 109 for S109)
         suffix: File extension to process (default: '.edf')
         skip: Number of files to skip per subject (default: 0)
-        min_length: Minimum length in seconds (default: 6.1)
+        min_length: Minimum length in seconds for processing (default: 20.0 for at least one frame)
         verbose: Print detailed progress information
     """
     base_from_path = Path(base_from_dir)
@@ -193,10 +251,10 @@ def convert_eeg_batch(base_from_dir, base_to_dir,
     print(f'Base Input Directory: {base_from_dir}')
     print(f'Base Output Directory: {base_to_dir}')
     print(f'Target sampling rate: {prms.sample_rate} Hz')
-    print(f'Processing ALL channels separately')
-    print(f'Output shape per channel: (80, time_frames)')
+    print(f'Processing ALL channels separately with 20s frames and 10s overlap')
+    print(f'Frame duration: {prms.frame_duration}s, Frame stride: {prms.frame_stride}s')
+    print(f'Output shape per frame: (80, ~{int(prms.frame_duration * prms.sample_rate / prms.hop_size)})')
     print(f'Frequency range: {prms.f_min}-{prms.f_max} Hz')
-
 
     for i in range(start_subject_id, end_subject_id + 1):
         subject_id = f"S{i:03d}"  # Format as S001, S002, etc.
@@ -205,7 +263,7 @@ def convert_eeg_batch(base_from_dir, base_to_dir,
         # Input: base_from_dir/S001/...edf
         # Output: base_to_dir/S001/...npy
         current_subject_from_dir = base_from_path / subject_id
-        current_subject_to_dir = base_to_path / subject_id # This creates output as base_to_dir/S001/S001RXX/channel.npy
+        current_subject_to_dir = base_to_path / subject_id
 
         if not current_subject_from_dir.exists():
             print(f"WARNING: Source directory for {subject_id} not found: {current_subject_from_dir}. Skipping.")
@@ -213,8 +271,7 @@ def convert_eeg_batch(base_from_dir, base_to_dir,
 
         print(f"\n--- Processing Subject: {subject_id} ---")
 
-        # Find all EDF files for the current subject, relative to current_subject_from_dir
-        # This will yield paths like "S001R01.edf", "S001R02.edf", etc.
+        # Find all EDF files for the current subject
         subject_edf_files = [f.relative_to(current_subject_from_dir) for f in current_subject_from_dir.glob(f'**/*{suffix}')]
         subject_edf_files = sorted(subject_edf_files)
 
@@ -226,26 +283,9 @@ def convert_eeg_batch(base_from_dir, base_to_dir,
             continue
 
         # Prepare arguments for multiprocessing worker for this subject's files
-        # The worker needs to know the *base* mounted directories (from_dir, to_dir) to construct absolute paths
-        # correctly for the *current file*.
         worker_args_for_subject = []
         for f in subject_edf_files:
-            # The 'subpathname' for the worker needs to be relative to the *root of the dataset*
-            # For example, if base_from_dir is /workspace/input_eeg_data/physionet.org/files/eegmmidb/1.0.0/
-            # and current_subject_from_dir is .../S001/
-            # and f is S001R01.edf
-            # we need subpathname to be S001/S001R01.edf for the worker to find it relative to base_from_dir.
-            # However, the current worker logic assumes 'subpathname' is relative to 'from_dir'.
-            # Let's adjust the worker call slightly or how 'subpathname' is generated.
-
-            # Option 1: Pass the full path to the worker, and let the worker strip it. Simpler.
-            # No, the worker needs subpathname to calculate relative output paths.
-
-            # Option 2 (Better): Keep subpathname relative to the subject's directory.
-            # And pass the subject's specific from_dir and to_dir to the worker.
-            # This is how your original _converter_worker was designed.
             worker_args_for_subject.append([f, str(current_subject_from_dir), str(current_subject_to_dir), prms, to_lms, suffix, min_length, verbose])
-
 
         print(f'  Processing {len(subject_edf_files)} {suffix} files for {subject_id}...')
 
@@ -256,43 +296,38 @@ def convert_eeg_batch(base_from_dir, base_to_dir,
         # Collect paths for CSV for the current subject
         for subpathname_relative_to_subject_dir, from_dir_worker, to_dir_worker, _, _, _, _, _ in worker_args_for_subject:
             file_stem = Path(subpathname_relative_to_subject_dir).stem
-            # This is the path like "S001R01" which is the folder name
             output_subfolder_name = Path(subpathname_relative_to_subject_dir).parent / file_stem
-
-            # The full path to the output folder for this file within the container
             full_output_folder_path_in_container = Path(to_dir_worker) / output_subfolder_name
 
             if full_output_folder_path_in_container.exists():
                 for npy_file in full_output_folder_path_in_container.glob('*.npy'):
-                    # The path added to the CSV should be relative to the *base_to_dir*
-                    # Example: S001/S001R01/EEG_Channel_Name.npy
                     relative_path_from_base_output = npy_file.relative_to(base_to_path)
                     all_generated_file_paths.append(relative_path_from_base_output)
 
         successful_subject_files = [r for r in results if r and 'failed' not in r]
         print(f'  Finished {subject_id}. Successfully processed {len(successful_subject_files)}/{len(subject_edf_files)} files.')
         for result in results:
-            if verbose and result: # Only print detailed results if verbose is true
+            if verbose and result:
                 print(f'    {result}')
 
-
     # Write to CSV after all subjects are processed
-    all_generated_file_paths.sort() # Sort all paths before writing
+    all_generated_file_paths.sort()
 
     csv_filename = base_to_path / "files_audioset.csv"
     try:
         with open(csv_filename, 'w', newline='') as csvfile:
             csv_writer = csv.writer(csvfile)
-            csv_writer.writerow(['filepath']) # Header row
+            csv_writer.writerow(['file_name'])
             for filepath in all_generated_file_paths:
-                csv_writer.writerow([str(filepath)]) # Write each path as a row
+                csv_writer.writerow([str(filepath)])
         print(f"\nSuccessfully wrote ALL generated file paths to {csv_filename}")
+        print(f"Total files generated: {len(all_generated_file_paths)}")
     except Exception as e:
         print(f"ERROR writing to CSV file {csv_filename}: {e}")
 
 
 if __name__ == "__main__":
     mp.set_start_method('spawn', force=True)
-    # The default command will run the batch conversion
-    # Pass base_from_dir and base_to_dir from Docker mounts
     fire.Fire(convert_eeg_batch)
+    # convert_eeg_batch("/Users/belindahu/Desktop/thesis/biometrics-JEPA/mmi/dataset/physionet.org/files/eegmmidb/1.0.0",
+    #                   "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data", 1, 1)
