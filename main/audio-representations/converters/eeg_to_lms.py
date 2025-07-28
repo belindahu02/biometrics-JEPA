@@ -329,5 +329,5 @@ def convert_eeg_batch(base_from_dir, base_to_dir,
 if __name__ == "__main__":
     mp.set_start_method('spawn', force=True)
     fire.Fire(convert_eeg_batch)
-    # convert_eeg_batch("/Users/belindahu/Desktop/thesis/biometrics-JEPA/mmi/dataset/physionet.org/files/eegmmidb/1.0.0",
-    #                   "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data", 1, 1)
+    convert_eeg_batch("/Users/belindahu/Desktop/thesis/biometrics-JEPA/mmi/dataset/physionet.org/files/eegmmidb/1.0.0",
+                      "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data", 1, 2)
