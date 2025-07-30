@@ -16,7 +16,7 @@ def eeg_to_spectrogram(
     sampling_rate: int = 125,
     noverlap: int = 1,
     return_raw_data: bool = False,
-    figsize: Tuple[int, int] = (3.84, 3.84),
+    figsize: Tuple[int, int] = (50, 50),
     dpi: int = 100
 ) -> Union[None, Tuple[np.ndarray, np.ndarray, np.ndarray]]:
     """
@@ -280,7 +280,7 @@ if __name__ == "__main__":
         dataset_path = "../../../mmi/dataset/physionet.org/files/eegmmidb/1.0.0"
         process_subject_folders(
             dataset_path,
-            subject_pattern="S00?"  # S001-S009
+            subject_pattern="S001"  # S001-S009
         )
     except Exception as e:
         print(f"Error: {e}")

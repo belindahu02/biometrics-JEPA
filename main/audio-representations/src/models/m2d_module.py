@@ -115,7 +115,7 @@ class M2DModule(LightningModule):
         loss = self.criterion(preds, targets)
 
         # update and log metrics
-        self.log("train/loss", loss, on_step=True, on_epoch=False, prog_bar=True)
+        self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
 
         # return loss or backpropagation will fail
         return loss

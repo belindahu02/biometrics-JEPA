@@ -5,7 +5,7 @@ crop_frames: ${model.encoder.img_size[1]}
 norm_stats:
   - -7.0633
   - 4.1971
-batch_size: 2048  # Needs to be divisible by the number of devices (e.g., if in a distributed setup)
-num_workers: 8   # Total number of workers (per GPU!)
-pin_memory: true
+batch_size: 8  # Needs to be divisible by the number of devices (e.g., if in a distributed setup)
+num_workers: 0   # Total number of workers (per GPU!)
+pin_memory: false
 devices: ${trainer.devices}
