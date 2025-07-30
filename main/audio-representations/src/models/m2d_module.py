@@ -117,6 +117,12 @@ class M2DModule(LightningModule):
         # update and log metrics
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True)
 
+        lr = self.trainer.optimizers[0].param_groups[0]['lr']
+        self.log("lr", lr, on_step=True, on_epoch=False)
+
+        grad_norm = torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1e9)
+        self.log("grad_norm", grad_norm, on_step=True, on_epoch=False)
+
         # return loss or backpropagation will fail
         return loss
 
