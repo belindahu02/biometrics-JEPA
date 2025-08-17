@@ -1,0 +1,97 @@
+# configs/train_classifier.yaml
+# @package _global_
+
+defaults:
+  - _self_
+  - data: your_eeg_data  # Your EEG datamodule config
+  - trainer: default
+  - logger: tensorboard
+  - callbacks: default
+  - paths: default
+  - extras: default
+  - hydra: default
+
+# Task name for logging
+task_name: "eeg_user_classification"
+
+# Tags to help you identify the experiment
+tags: ["jepa", "classification", "eeg", "user_id"]
+
+# Enable training and testing
+train: True
+test: True
+
+# Random seed
+seed: 12345
+
+# Model configuration
+model:
+  # Path to pre-trained JEPA model checkpoint
+  pretrained_jepa_path: "/path/to/your/jepa/checkpoint.ckpt"
+
+  # Classification parameters
+  num_users: 109
+  hidden_dim: 256
+  dropout_rate: 0.3
+  freeze_jepa: True  # Set to False for fine-tuning
+  learning_rate: 1e-4
+  weight_decay: 1e-5
+
+# Data configuration (adjust based on your data)
+data:
+  batch_size: 32
+  num_workers: 4
+  # Ensure your datamodule returns 8-channel EEG data and user labels
+
+# Trainer configuration
+trainer:
+  min_epochs: 10
+  max_epochs: 100
+  accelerator: gpu
+  devices: 1
+  precision: 16-mixed
+  gradient_clip_val: 1.0
+  accumulate_grad_batches: 1
+  log_every_n_steps: 10
+  val_check_interval: 1.0
+  check_val_every_n_epoch: 1
+
+# Callbacks
+callbacks:
+  model_checkpoint:
+    _target_: lightning.pytorch.callbacks.ModelCheckpoint
+    dirpath: ${paths.output_dir}/checkpoints
+    filename: "epoch_{epoch:03d}"
+    monitor: "val/acc"
+    mode: "max"
+    save_last: True
+    auto_insert_metric_name: False
+    save_top_k: 3
+    verbose: False
+
+  early_stopping:
+    _target_: lightning.pytorch.callbacks.EarlyStopping
+    monitor: "val/acc"
+    mode: "max"
+    patience: 15
+    verbose: False
+
+  learning_rate_monitor:
+    _target_: lightning.pytorch.callbacks.LearningRateMonitor
+    logging_interval: "step"
+
+# Logger configuration
+logger:
+  tensorboard:
+    _target_: lightning.pytorch.loggers.TensorBoardLogger
+    save_dir: "${paths.output_dir}/logs/"
+    name: null
+    log_graph: False
+    default_hp_metric: False
+    prefix: ""
+
+# Metric to optimize (for hyperparameter sweeps)
+optimized_metric: "val/acc"
+
+# Compile model for better performance (PyTorch 2.0+)
+compile: False
