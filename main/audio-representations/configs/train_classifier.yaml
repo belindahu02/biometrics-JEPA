@@ -37,11 +37,22 @@ model:
   learning_rate: 1e-4
   weight_decay: 1e-5
 
-# Data configuration (adjust based on your data)
+# Data configuration
 data:
+  _target_: src.data.eeg_classification_datamodule.EEGClassificationDataModule
+  data_path: "/path/to/your/eeg/data"  # Update this path
+  dataset: "your_dataset_name"  # Update this name
+  crop_frames: 1000  # Adjust based on your sequence length
+  selected_channels: [0, 1, 2, 3, 4, 5, 6, 7]  # Which 8 channels to use
   batch_size: 32
   num_workers: 4
-  # Ensure your datamodule returns 8-channel EEG data and user labels
+  pin_memory: True
+  devices: 1
+  train_split: 0.7
+  val_split: 0.15
+  test_split: 0.15
+  random_state: 42
+  min_samples_per_user: 10
 
 # Trainer configuration
 trainer:
