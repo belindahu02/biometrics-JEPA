@@ -1,116 +1,62 @@
-# configs/train_classifier.yaml
 # @package _global_
 
+# specify here default configuration
+# order of defaults determines the order in which configs override each other
 defaults:
   - _self_
-  - data: your_eeg_data  # Your EEG datamodule config
-  - trainer: default
-  - logger: tensorboard
+  - data: audioset_classification  # New data config for classification
+  - model: jepa_classifier         # New model config for classifier
   - callbacks: default
+  - logger: tensorboard
+  - trainer: default
   - paths: default
   - extras: default
   - hydra: default
+  - dora: default
+  - slurm: gaia
 
-# Task name for logging (make it unique)
-task_name: "eeg_user_classification"
+  - cluster: null
 
-# Tags to help you identify the experiment
+  # experiment configs allow for version control of specific hyperparameters
+  # e.g. best hyperparameters for given model and datamodule
+  - experiment: null
+
+  # config for hyperparameter optimization
+  - hparams_search: null
+
+  # optional local config for machine/user specific settings
+  # it's optional since it doesn't need to exist and is excluded from version control
+  - optional local: default
+
+  # debugging config (enable through command line, e.g. `python train.py debug=default)
+  - debug: null
+
+# task name, determines output directory path (unique to avoid overwriting)
+task_name: "jepa_classifier"
+
+# tags to help you identify your experiments
+# you can overwrite this in experiment configs
+# overwrite from command line with `python train.py tags="[first_tag, second_tag]"`
 tags: ["jepa", "classification", "eeg", "user_id"]
 
-# Use timestamped runs to avoid overwriting
-run_name: "classifier_${now:%Y-%m-%d_%H-%M-%S}"
+# set False to skip model training
+train: true
 
-# Enable training and testing
-train: True
-test: True
+# evaluate on test set, using best model weights achieved during training
+# lightning chooses best weights based on the metric specified in checkpoint callback
+test: true
 
-# Random seed
-seed: 12345
+# simply provide checkpoint path to resume training
+ckpt_path: null
 
-# Model configuration
-model:
-  # Path to pre-trained JEPA model checkpoint
-  pretrained_jepa_path: "/path/to/your/jepa/checkpoint.ckpt"
+# seed for random number generators in pytorch, numpy and python.random
+seed: 42
 
-  # Classification parameters
-  num_users: 109
-  hidden_dim: 256
-  dropout_rate: 0.3
-  freeze_jepa: True  # Set to False for fine-tuning
-  learning_rate: 1e-4
-  weight_decay: 1e-5
-
-# Data configuration (based on your audioset config)
-data:
-  _target_: src.data.eeg_classification_datamodule.EEGClassificationDataModule
-  data_path: ${paths.data_dir}
-  dataset: ${data.data_path}/files_audioset.csv  # Your existing CSV file
-  crop_frames: ${model.encoder.img_size[1]}  # Same as original JEPA training
-  selected_channels: [3, 12, 13, 18, 50, 60, 61, 64]  # Your specified channels
-  norm_stats:
-    - -7.0633  # Same as original
-    - 4.1971   # Same as original
-  batch_size: 8  # Same as original
-  num_workers: 0
-  pin_memory: false
-  devices: ${trainer.devices}
-  # New parameters for classification
-  train_split: 0.7
-  val_split: 0.15
-  test_split: 0.15
-  random_state: 42
-  min_samples_per_user: 10
-
-# Trainer configuration
-trainer:
-  min_epochs: 10
-  max_epochs: 100
-  accelerator: gpu
-  devices: 1
-  precision: 16-mixed
-  gradient_clip_val: 1.0
-  accumulate_grad_batches: 1
-  log_every_n_steps: 10
-  val_check_interval: 1.0
-  check_val_every_n_epoch: 1
-
-# Callbacks
-callbacks:
-  model_checkpoint:
-    _target_: lightning.pytorch.callbacks.ModelCheckpoint
-    dirpath: ${paths.output_dir}/checkpoints/classifier_${run_name}
-    filename: "epoch_{epoch:03d}"
-    monitor: "val/acc"
-    mode: "max"
-    save_last: True
-    auto_insert_metric_name: False
-    save_top_k: 3
-    verbose: False
-
-  early_stopping:
-    _target_: lightning.pytorch.callbacks.EarlyStopping
-    monitor: "val/acc"
-    mode: "max"
-    patience: 15
-    verbose: False
-
-  learning_rate_monitor:
-    _target_: lightning.pytorch.callbacks.LearningRateMonitor
-    logging_interval: "step"
-
-# Logger configuration
-logger:
-  tensorboard:
-    _target_: lightning.pytorch.loggers.TensorBoardLogger
-    save_dir: "${paths.output_dir}/logs/"
-    name: "classifier_experiments"  # Separate from JEPA logs
-    version: "${run_name}"  # Use timestamped version
-    log_graph: False
-    default_hp_metric: False
-    prefix: ""
-
-# Metric to optimize (for hyperparameter sweeps)
+# metric to optimize for hyperparameter search
 optimized_metric: "val/acc"
 
-# Compile model for better performance (PyTorch 2.0+)
-compile: False
+logger:
+  class_path: lightning.pytorch.loggers.TensorBoardLogger
+  init_args:
+    save_dir: logs
+    name: jepa_classifier  # Different from your original to prevent overwriting

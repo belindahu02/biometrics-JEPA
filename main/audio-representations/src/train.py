@@ -12,22 +12,6 @@ from lightning.pytorch.loggers import Logger
 from omegaconf import DictConfig
 
 rootutils.setup_root(__file__, indicator=".project-root", pythonpath=True)
-# ------------------------------------------------------------------------------------ #
-# the setup_root above is equivalent to:
-# - adding project root dir to PYTHONPATH
-#       (so you don't need to force user to install project as a package)
-#       (necessary before importing any local modules e.g. `from src import utils`)
-# - setting up PROJECT_ROOT environment variable
-#       (which is used as a base for paths in "configs/paths/default.yaml")
-#       (this way all filepaths are the same no matter where you run the code)
-# - loading environment variables from ".env" in root dir
-#
-# you can remove it if you:
-# 1. either install project as a package or move entry files to project root dir
-# 2. set `root_dir` to "." in "configs/paths/default.yaml"
-#
-# more info: https://github.com/ashleve/rootutils
-# ------------------------------------------------------------------------------------ #
 
 from src.utils import (
     RankedLogger,
@@ -40,30 +24,78 @@ from src.utils import (
     task_wrapper,
 )
 
+# Import your JEPA classifier
+from src.models.jepa_classifier import JEPAClassifier  # Adjust import path
+
 log = RankedLogger(__name__, rank_zero_only=True)
 register_resolvers()
 
 
+def load_pretrained_jepa(checkpoint_path: str) -> torch.nn.Module:
+    """
+    Load pre-trained JEPA model from checkpoint.
+
+    Args:
+        checkpoint_path: Path to JEPA model checkpoint
+
+    Returns:
+        Pre-trained JEPA model
+    """
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"JEPA checkpoint not found: {checkpoint_path}")
+
+    log.info(f"Loading JEPA model from: {checkpoint_path}")
+
+    # Option 1: If you saved a Lightning checkpoint
+    try:
+        # Load the full Lightning module
+        jepa_lightning_model = hydra.utils.instantiate(cfg.model.encoder._target_).load_from_checkpoint(checkpoint_path)
+        # Extract just the encoder/model part
+        jepa_model = jepa_lightning_model.model  # or .encoder, depending on your structure
+        log.info("Successfully loaded JEPA model from Lightning checkpoint")
+        return jepa_model
+    except Exception as e:
+        log.warning(f"Could not load as Lightning checkpoint: {e}")
+
+    # Option 2: If you saved just the model weights
+    try:
+        # Initialize the model architecture first
+        jepa_model = hydra.utils.instantiate(cfg.model.encoder)
+        # Load the weights
+        state_dict = torch.load(checkpoint_path, map_location='cpu')
+        if 'state_dict' in state_dict:
+            state_dict = state_dict['state_dict']
+        jepa_model.load_state_dict(state_dict, strict=False)
+        log.info("Successfully loaded JEPA model weights")
+        return jepa_model
+    except Exception as e:
+        log.error(f"Could not load JEPA model: {e}")
+        raise e
+
+
 @task_wrapper
 def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """Trains the model. Can additionally evaluate on a testset, using best weights obtained during
-    training.
+    """Trains the JEPA classifier model."""
 
-    This method is wrapped in optional @task_wrapper decorator, that controls the behavior during
-    failure. Useful for multiruns, saving info about the crash, etc.
-
-    :param cfg: A DictConfig configuration composed by Hydra.
-    :return: A tuple with metrics and dict with all instantiated objects.
-    """
-    # set seed for random number generators in pytorch, numpy and python.random
+    # Set seed for reproducibility
     if cfg.get("seed"):
         L.seed_everything(cfg.seed, workers=True)
 
     log.info(f"Instantiating datamodule <{cfg.data._target_}>")
     datamodule: LightningDataModule = hydra.utils.instantiate(cfg.data)
 
-    log.info(f"Instantiating model <{cfg.model._target_}>")
-    model: LightningModule = hydra.utils.instantiate(cfg.model)
+    # Load pre-trained JEPA model
+    if cfg.model.get("pretrained_jepa_path"):
+        jepa_model = load_pretrained_jepa(cfg.model.pretrained_jepa_path)
+    else:
+        raise ValueError("pretrained_jepa_path must be specified in model config")
+
+    # Create classifier model with proper instantiation
+    log.info("Creating JEPA classifier model")
+    model = JEPAClassifier(
+        jepa_model=jepa_model,
+        **{k: v for k, v in cfg.model.items() if k != 'pretrained_jepa_path' and k != '_target_' and k != 'encoder'}
+    )
 
     log.info("Instantiating callbacks...")
     callbacks: List[Callback] = instantiate_callbacks(cfg.get("callbacks"))
@@ -87,24 +119,26 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         log.info("Logging hyperparameters!")
         log_hyperparameters(object_dict)
 
-    # automatically resume from latest checkpoint if exists and ckpt_path not manually specified
+    # Handle checkpoint resuming for classifier training
     ckpt_path = cfg.get("ckpt_path")
     if ckpt_path is None and os.path.exists(cfg.paths.ckpt_dir):
         print(cfg.paths.ckpt_dir)
-        candidates = [os.path.join(cfg.paths.ckpt_dir, ckpt_file) for ckpt_file in os.listdir(cfg.paths.ckpt_dir) if ckpt_file.endswith(".ckpt")]
+        candidates = [os.path.join(cfg.paths.ckpt_dir, ckpt_file)
+                      for ckpt_file in os.listdir(cfg.paths.ckpt_dir)
+                      if ckpt_file.endswith(".ckpt")]
         if candidates:
             ckpt_path = max(candidates, key=os.path.getmtime)
-            log.info(f"Resuming from checkpoint {ckpt_path}...")
+            log.info(f"Resuming classifier training from checkpoint {ckpt_path}...")
         else:
             ckpt_path = None
-    
+
     log.info(f"Number of CPUs allocated: {os.cpu_count()}")
     log.info(f"Number of GPUs allocated: {torch.cuda.device_count()}")
     log.info(f"Number of threads: {torch.get_num_threads()}, {torch.get_num_interop_threads()}")
     log.info(f"OMP_NUM_THREADS: {os.environ.get('OMP_NUM_THREADS')}")
 
     if cfg.get("train"):
-        log.info("Starting training!")
+        log.info("Starting classifier training!")
         with torch.backends.cuda.sdp_kernel(enable_flash=True, enable_math=True, enable_mem_efficient=True):
             trainer.fit(model=model, datamodule=datamodule, ckpt_path=ckpt_path)
 
@@ -121,36 +155,31 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     test_metrics = trainer.callback_metrics
 
-    # merge train and test metrics
+    # Merge train and test metrics
     metric_dict = {**train_metrics, **test_metrics}
 
     return metric_dict, object_dict
 
 
-@hydra_main(version_base="1.3", config_path="../configs", config_name="train.yaml")
+@hydra_main(version_base="1.3", config_path="../configs", config_name="train_classifier.yaml")
 def main(cfg: DictConfig) -> Optional[float]:
-    """Main entry point for training.
+    """Main entry point for classifier training."""
 
-    :param cfg: DictConfig configuration composed by Hydra.
-    :return: Optional[float] with optimized metric value.
-    """
-    # handle A100 GPUs
+    # Handle A100 GPUs
     if torch.cuda.is_available() and "A100" in torch.cuda.get_device_name():
         torch.set_float32_matmul_precision("high")
 
-    # apply extra utilities
-    # (e.g. ask for tags if none are provided in cfg, print cfg tree, etc.)
+    # Apply extra utilities
     extras(cfg)
 
-    # train the model
+    # Train the classifier
     metric_dict, _ = train(cfg)
 
-    # safely retrieve metric value for hydra-based hyperparameter optimization
+    # Safely retrieve metric value for hyperparameter optimization
     metric_value = get_metric_value(
         metric_dict=metric_dict, metric_name=cfg.get("optimized_metric")
     )
 
-    # return optimized metric
     return metric_value
 
 
