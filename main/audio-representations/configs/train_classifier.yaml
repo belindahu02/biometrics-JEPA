@@ -11,11 +11,14 @@ defaults:
   - extras: default
   - hydra: default
 
-# Task name for logging
+# Task name for logging (make it unique)
 task_name: "eeg_user_classification"
 
 # Tags to help you identify the experiment
 tags: ["jepa", "classification", "eeg", "user_id"]
+
+# Use timestamped runs to avoid overwriting
+run_name: "classifier_${now:%Y-%m-%d_%H-%M-%S}"
 
 # Enable training and testing
 train: True
@@ -37,17 +40,21 @@ model:
   learning_rate: 1e-4
   weight_decay: 1e-5
 
-# Data configuration
+# Data configuration (based on your audioset config)
 data:
   _target_: src.data.eeg_classification_datamodule.EEGClassificationDataModule
-  data_path: "/path/to/your/eeg/data"  # Update this path
-  dataset: "your_dataset_name"  # Update this name
-  crop_frames: 1000  # Adjust based on your sequence length
-  selected_channels: [0, 1, 2, 3, 4, 5, 6, 7]  # Which 8 channels to use
-  batch_size: 32
-  num_workers: 4
-  pin_memory: True
-  devices: 1
+  data_path: ${paths.data_dir}
+  dataset: ${data.data_path}/files_audioset.csv  # Your existing CSV file
+  crop_frames: ${model.encoder.img_size[1]}  # Same as original JEPA training
+  selected_channels: [3, 12, 13, 18, 50, 60, 61, 64]  # Your specified channels
+  norm_stats:
+    - -7.0633  # Same as original
+    - 4.1971   # Same as original
+  batch_size: 8  # Same as original
+  num_workers: 0
+  pin_memory: false
+  devices: ${trainer.devices}
+  # New parameters for classification
   train_split: 0.7
   val_split: 0.15
   test_split: 0.15
@@ -71,7 +78,7 @@ trainer:
 callbacks:
   model_checkpoint:
     _target_: lightning.pytorch.callbacks.ModelCheckpoint
-    dirpath: ${paths.output_dir}/checkpoints
+    dirpath: ${paths.output_dir}/checkpoints/classifier_${run_name}
     filename: "epoch_{epoch:03d}"
     monitor: "val/acc"
     mode: "max"
@@ -96,7 +103,8 @@ logger:
   tensorboard:
     _target_: lightning.pytorch.loggers.TensorBoardLogger
     save_dir: "${paths.output_dir}/logs/"
-    name: null
+    name: "classifier_experiments"  # Separate from JEPA logs
+    version: "${run_name}"  # Use timestamped version
     log_graph: False
     default_hp_metric: False
     prefix: ""
