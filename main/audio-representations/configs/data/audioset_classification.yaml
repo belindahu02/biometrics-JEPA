@@ -1,11 +1,9 @@
-# @package _global_
-
 # EEG Classification data config (extends audioset config structure)
-_target_: src.data.eeg_classification_datamodule.EEGClassificationDataModule
+_target_: src.data.classifier_datamodule.EEGClassificationDataModule
 
 # Keep all your original audioset parameters
 data_path: ${paths.data_dir}
-dataset: ${data.data_path}/files_audioset.csv
+dataset: ${paths.data_dir}/files_audioset.csv  # Fixed circular reference
 crop_frames: ${model.encoder.img_size[1]}
 norm_stats:
   - -7.0633

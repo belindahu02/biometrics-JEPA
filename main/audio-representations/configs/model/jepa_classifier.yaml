@@ -1,21 +1,23 @@
 # @package _global_
 
 # JEPA Classifier model configuration
-_target_: src.models.jepa_classifier.JEPAClassifier
+_target_: src.models.classification_head.JEPAClassifier
 
+model:
 # Path to pre-trained JEPA model checkpoint
-pretrained_jepa_path: "/logs/xps/last.ckpt"  # UPDATE THIS PATH
+  pretrained_jepa_path: "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/logs/xps/97d170e1/checkpoints/last.ckpt"  # UPDATE THIS PATH
 
-# Classification head parameters
-num_users: 109  # Adjust based on your actual number of users
-hidden_dim: 256
-dropout_rate: 0.3
-freeze_jepa: true  # Set to false for fine-tuning
-learning_rate: 1e-4
-weight_decay: 1e-5
+  # Classification head parameters
+  num_users: 109  # Adjust based on your actual number of users
+  hidden_dim: 256
+  dropout_rate: 0.3
+  freeze_jepa: true  # Set to false for fine-tuning
+  learning_rate: 1e-4
+  weight_decay: 1e-5
 
-# Keep your original encoder config structure for compatibility
-encoder:
-  img_size: [64, 1000]  # [channels, time_frames] - adjust as needed
-  patch_size: [1, 50]   # Adjust based on your JEPA model
-  # Add other encoder parameters as needed from your original config
+  # Keep your original encoder config structure for compatibility
+  encoder:
+    _target_: src.models.classification_head.JEPAClassifier   # <-- fully qualified class path
+    img_size: [64, 1000]  # [channels, time_frames] - adjust as needed
+    patch_size: [1, 50]   # Adjust based on your JEPA model
+    # Add other encoder parameters as needed from your original config

@@ -25,53 +25,82 @@ from src.utils import (
 )
 
 # Import your JEPA classifier
-from src.models.jepa_classifier import JEPAClassifier  # Adjust import path
+from src.models.classification_head import JEPAClassifier  # Adjust import path
+from src.models.components.vision_transformer import ViTEncoder as JEPAEncoder
 
 log = RankedLogger(__name__, rank_zero_only=True)
 register_resolvers()
 
 
-def load_pretrained_jepa(checkpoint_path: str) -> torch.nn.Module:
+import os
+import torch
+import hydra
+import logging
+
+log = logging.getLogger(__name__)
+
+def load_pretrained_jepa(encoder_cfg, classifier_cfg=None):
     """
-    Load pre-trained JEPA model from checkpoint.
+    Load a JEPA model from checkpoint.
+    Tries Lightning checkpoint first, falls back to manual loading if needed.
 
     Args:
-        checkpoint_path: Path to JEPA model checkpoint
+        encoder_cfg (DictConfig or dict): Encoder config.
+        classifier_cfg (DictConfig or dict, optional): Classifier init args.
 
     Returns:
-        Pre-trained JEPA model
+        jepa_model (nn.Module): Loaded JEPA model (encoder or classifier).
     """
-    if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"JEPA checkpoint not found: {checkpoint_path}")
-
-    log.info(f"Loading JEPA model from: {checkpoint_path}")
-
-    # Option 1: If you saved a Lightning checkpoint
+    # --- Option 1: Try Lightning checkpoint ---
     try:
-        # Load the full Lightning module
-        jepa_lightning_model = hydra.utils.instantiate(cfg.model.encoder._target_).load_from_checkpoint(checkpoint_path)
-        # Extract just the encoder/model part
-        jepa_model = jepa_lightning_model.model  # or .encoder, depending on your structure
-        log.info("Successfully loaded JEPA model from Lightning checkpoint")
+        # Instantiate Lightning module if possible
+        lightning_model = hydra.utils.instantiate(encoder_cfg).load_from_checkpoint(
+            encoder_cfg.model.pretrained_jepa_path
+        )
+        jepa_model = getattr(lightning_model, "model", lightning_model)
+        log.info("✅ Successfully loaded JEPA model from Lightning checkpoint")
         return jepa_model
-    except Exception as e:
-        log.warning(f"Could not load as Lightning checkpoint: {e}")
 
-    # Option 2: If you saved just the model weights
-    try:
-        # Initialize the model architecture first
-        jepa_model = hydra.utils.instantiate(cfg.model.encoder)
-        # Load the weights
-        state_dict = torch.load(checkpoint_path, map_location='cpu')
-        if 'state_dict' in state_dict:
-            state_dict = state_dict['state_dict']
-        jepa_model.load_state_dict(state_dict, strict=False)
-        log.info("Successfully loaded JEPA model weights")
-        return jepa_model
     except Exception as e:
-        log.error(f"Could not load JEPA model: {e}")
+        log.warning(f"⚠️ Could not load as Lightning checkpoint: {e}")
+
+    # --- Option 2: Manual loading ---
+    try:
+        log.info("🔄 Falling back to manual encoder + classifier loading")
+
+        # 1️⃣ Extract encoder parameters from config
+        if "encoder" in encoder_cfg:
+            encoder_params = encoder_cfg["encoder"]
+        else:
+            encoder_params = encoder_cfg
+
+        # Instantiate encoder
+        encoder_params = dict(encoder_cfg.get("encoder", encoder_cfg))  # copy to avoid mutation
+        encoder_params.pop("_target_", None)  # remove if present
+        encoder = JEPAEncoder(**encoder_params)
+
+        # 2️⃣ Instantiate classifier if config is provided
+        if classifier_cfg is not None:
+            if "classifier" in classifier_cfg:
+                classifier_params = classifier_cfg["classifier"]
+            else:
+                classifier_params = classifier_cfg
+            model = JEPAClassifier(jepa_model=encoder, **classifier_params)
+        else:
+            model = encoder
+
+        # 3️⃣ Load checkpoint state dict
+        ckpt_path = encoder_cfg["model"]["pretrained_jepa_path"]
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        state_dict = ckpt.get("state_dict", ckpt)
+        model.load_state_dict(state_dict, strict=False)  # strict=False for partial matches
+
+        log.info("✅ Successfully loaded JEPA model manually from checkpoint")
+        return model
+
+    except Exception as e:
+        log.error(f"❌ Could not load JEPA model from checkpoint: {e}")
         raise e
-
 
 @task_wrapper
 def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -86,7 +115,7 @@ def train(cfg: DictConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
 
     # Load pre-trained JEPA model
     if cfg.model.get("pretrained_jepa_path"):
-        jepa_model = load_pretrained_jepa(cfg.model.pretrained_jepa_path)
+        jepa_model = load_pretrained_jepa(cfg.model.encoder, cfg.model.pretrained_jepa_path)
     else:
         raise ValueError("pretrained_jepa_path must be specified in model config")
 

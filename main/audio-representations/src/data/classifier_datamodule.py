@@ -1,10 +1,9 @@
 from typing import List, Tuple, Optional
-
+import torch
 from torch.utils.data import DataLoader
 from lightning.pytorch import LightningDataModule
-from sklearn.model_selection import train_test_split
 
-from src.data.components.eeg_classification_dataset import build_classification_dataset
+from src.data.components.classifier_dataset import build_classification_dataset
 
 
 class EEGClassificationDataModule(LightningDataModule):
@@ -63,6 +62,27 @@ class EEGClassificationDataModule(LightningDataModule):
         print(f"Selected channels: {selected_channels}")
         print(f"Batch size per device: {batch_size // devices}")
 
+    def _split_users(self, all_users: List):
+        """Split users into train/val/test using PyTorch's generator for reproducibility."""
+        # Set random seed for reproducible splits
+        generator = torch.Generator().manual_seed(self.hparams.random_state)
+
+        # Shuffle users
+        indices = torch.randperm(len(all_users), generator=generator).tolist()
+        shuffled_users = [all_users[i] for i in indices]
+
+        # Calculate split sizes
+        n_users = len(all_users)
+        train_size = int(self.hparams.train_split * n_users)
+        val_size = int(self.hparams.val_split * n_users)
+
+        # Split users
+        train_users = shuffled_users[:train_size]
+        val_users = shuffled_users[train_size:train_size + val_size]
+        test_users = shuffled_users[train_size + val_size:]
+
+        return train_users, val_users, test_users
+
     def setup(self, stage: Optional[str] = None):
         """Set up datasets for different stages."""
 
@@ -79,17 +99,7 @@ class EEGClassificationDataModule(LightningDataModule):
             print(f"Found {self.num_users} users: {all_users}")
 
             # Split users into train/val/test
-            train_users, temp_users = train_test_split(
-                all_users,
-                test_size=self.hparams.val_split + self.hparams.test_split,
-                random_state=self.hparams.random_state
-            )
-
-            val_users, test_users = train_test_split(
-                temp_users,
-                test_size=self.hparams.test_split / (self.hparams.val_split + self.hparams.test_split),
-                random_state=self.hparams.random_state
-            )
+            train_users, val_users, test_users = self._split_users(all_users)
 
             # Store test users for later use
             self._test_users = test_users
@@ -122,18 +132,7 @@ class EEGClassificationDataModule(LightningDataModule):
                 )
                 all_users = full_dataset.users
 
-                train_users, temp_users = train_test_split(
-                    all_users,
-                    test_size=self.hparams.val_split + self.hparams.test_split,
-                    random_state=self.hparams.random_state
-                )
-
-                val_users, test_users = train_test_split(
-                    temp_users,
-                    test_size=self.hparams.test_split / (self.hparams.val_split + self.hparams.test_split),
-                    random_state=self.hparams.random_state
-                )
-
+                train_users, val_users, test_users = self._split_users(all_users)
                 self._test_users = test_users
 
             # Create test dataset
