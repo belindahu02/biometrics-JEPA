@@ -9,7 +9,7 @@ import os
 
 # Configuration
 # DATA_PATH = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/classification_input"  # UPDATE THIS PATH
-# OUTPUT_PATH = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/output_path"
+# OUTPUT_PATH = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/graph_data"
 # GRAPH_PATH = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/graphs"
 DATA_PATH = "/app/data/grouped_embeddings"
 OUTPUT_PATH = "/app/data/graph_data"
