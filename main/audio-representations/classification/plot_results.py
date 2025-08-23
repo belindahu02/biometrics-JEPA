@@ -5,10 +5,18 @@
 from trainers import spectrogram_trainer  # Use new trainer
 import numpy as np
 import matplotlib.pyplot as plt
+import os
 
 # Configuration
-DATA_PATH = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/classification_input"  # UPDATE THIS PATH
-USER_IDS = list(range(1, 110))  # Users 1 to 109
+# DATA_PATH = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/classification_input"  # UPDATE THIS PATH
+# OUTPUT_PATH = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/output_path"
+# GRAPH_PATH = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/graphs"
+DATA_PATH = "/app/data/grouped_embeddings"
+OUTPUT_PATH = "/app/data/graph_data"
+GRAPH_PATH = "/app/data/graphs"
+os.makedirs(OUTPUT_PATH, exist_ok=True)
+os.makedirs(GRAPH_PATH, exist_ok=True)
+USER_IDS = list(range(1, 2))  # Users 1 to 109
 CONVERSION_METHOD = 'pca'  # Options: 'pca', 'downsample', 'average_bands', 'mel_bands'
 
 variable_name = "samples per user"
@@ -49,18 +57,19 @@ for i, samples_per_user in enumerate(variable):
         print(f"  Completed {samples_per_user} samples/user - Avg Acc: {np.mean(acc_temp):.4f}")
     else:
         print(f"  No successful runs for {samples_per_user} samples/user")
-
-# Convert to numpy arrays
 acc = np.array(acc)
 kappa = np.array(kappa)
 
 # Save results
-np.savez(f"graph_data/{model_name}.npz", test_acc=acc, kappa_score=kappa)
+output_file = os.path.join(OUTPUT_PATH, f"{model_name}.npz")
+np.savez(output_file, test_acc=acc, kappa_score=kappa)
 print(f"\nResults saved to graph_data/{model_name}.npz")
 print(f"Accuracy shape: {acc.shape}")
 print(f"Kappa shape: {kappa.shape}")
 
 # Plot results
+# Convert to numpy arrays
+
 if len(acc) > 0:
     # Kappa plot
     kappa_max = np.max(kappa, axis=1)
@@ -72,7 +81,8 @@ if len(acc) > 0:
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(f'graphs/kappa_{CONVERSION_METHOD}.jpg', dpi=300, bbox_inches='tight')
+    output_graph = os.path.join(GRAPH_PATH, f"kappa_{CONVERSION_METHOD}.jpg")
+    plt.savefig(output_graph, dpi=300, bbox_inches='tight')
     plt.show()
     plt.close()
 
@@ -86,7 +96,8 @@ if len(acc) > 0:
     plt.grid(True, alpha=0.3)
     plt.legend()
     plt.tight_layout()
-    plt.savefig(f'graphs/acc_{CONVERSION_METHOD}.jpg', dpi=300, bbox_inches='tight')
+    output_graph = os.path.join(GRAPH_PATH, f"acc_{CONVERSION_METHOD}.jpg")
+    plt.savefig(output_graph, dpi=300, bbox_inches='tight')
     plt.show()
     plt.close()
 

@@ -58,8 +58,10 @@ def compare_conversion_methods(data_path, user_ids, samples_per_user=10, n_runs=
 
 if __name__ == "__main__":
     # UPDATE THESE PATHS
-    DATA_PATH = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/classification_input"
-    USER_IDS = list(range(1, 2))  # Users 1 to 109
+    DATA_PATH = "/app/data/grouped_embeddings"
+
+    # DATA_PATH = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/classification_input"
+    USER_IDS = list(range(1, 110))  # Users 1 to 109
 
     # Compare methods
     comparison_results = compare_conversion_methods(DATA_PATH, USER_IDS)

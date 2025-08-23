@@ -100,8 +100,8 @@ def load_spectrogram_data_as_1d(data_path, user_ids, conversion_method='pca', ta
                 if os.path.exists(spec_file):
                     try:
                         spec = np.load(spec_file)
-                        if spec.shape == (4160, 768):
-                        # if spec.shape == (520, 768):
+                        # if spec.shape == (4160, 768):
+                        if spec.shape == (520, 768):
                             user_spectrograms.append(spec)
                             session_count += 1
                         else:
