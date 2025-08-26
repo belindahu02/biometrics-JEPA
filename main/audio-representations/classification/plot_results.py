@@ -202,7 +202,7 @@ def create_plots(acc, kappa, num_completed, suffix=""):
 # Main execution
 print(f"Running experiments with conversion method: {CONVERSION_METHOD}")
 print(f"Testing {len(variable)} different sample sizes...")
-print(f"Training will run for 150 epochs per experiment (increased from 100)")
+print(f"Training will run for 200 epochs per experiment")
 
 # Try to load previous progress
 start_idx, start_itr, acc, kappa = load_checkpoint()
