@@ -34,9 +34,9 @@ def plotter(paths, names, variables, variable_name, graph_name):
 paths = [
     "/app/data/baselines/musicid_scen1_supervised.npz",
     "/app/data/baselines/musicid_scen1_DA.npz",
-    "/app/data/baselines/multi_task/musicid_scen1_multi task.npz",
+    "/app/data/baselines/musicid_scen1_multi task.npz",
     "/app/data/baselines/musicid_scen1_simsiam.npz",
-    "/app/data/graph_data/jepa.npz"  # <-- new file
+    "/app/data/graph_data/spectrogram_1d_converted_pca.npz"  # <-- new file
 ]
 
 names = [
