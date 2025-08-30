@@ -16,6 +16,8 @@ import time
 import logging
 import matplotlib.pyplot as plt
 
+torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.enabled = True
 
 def setup_logging(log_dir):
     """Setup comprehensive logging for training"""
@@ -228,8 +230,21 @@ def spectrogram_trainer_2d(samples_per_user, data_path, user_ids, normalization_
 
     # Create DataLoaders
     train_loader = DataLoader(TensorDataset(x_train, y_train), batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(TensorDataset(x_val, y_val), batch_size=batch_size)
-    test_loader = DataLoader(TensorDataset(x_test, y_test), batch_size=batch_size)
+    train_loader = DataLoader(
+        TensorDataset(x_train, y_train),
+        batch_size=batch_size, shuffle=True,
+        num_workers=4, pin_memory=True
+    )
+    val_loader = DataLoader(
+        TensorDataset(x_val, y_val),
+        batch_size=batch_size,
+        num_workers=4, pin_memory=True
+    )
+    test_loader = DataLoader(
+        TensorDataset(x_test, y_test),
+        batch_size=batch_size,
+        num_workers=4, pin_memory=True
+    )
 
     num_classes = len(np.unique(y_train.numpy()))
     logger.info(f"Number of classes: {num_classes}")
@@ -256,6 +271,11 @@ def spectrogram_trainer_2d(samples_per_user, data_path, user_ids, normalization_
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
+    if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+        model = nn.DataParallel(model)
+    model = model.to(device)
+
     # Log model info
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -266,7 +286,7 @@ def spectrogram_trainer_2d(samples_per_user, data_path, user_ids, normalization_
     # --------------------------
     # Training setup
     # --------------------------
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     criterion = nn.CrossEntropyLoss()
 
     # Learning rate scheduler
@@ -320,6 +340,7 @@ def spectrogram_trainer_2d(samples_per_user, data_path, user_ids, normalization_
         # Save regular checkpoint
         checkpoint_path = os.path.join(run_checkpoint_dir, f'checkpoint_epoch_{epoch}.pt')
         torch.save(checkpoint, checkpoint_path)
+        scaler = torch.cuda.amp.GradScaler()
 
         # Save best model separately
         if is_best:
@@ -354,10 +375,13 @@ def spectrogram_trainer_2d(samples_per_user, data_path, user_ids, normalization_
         for batch_idx, (xb, yb) in enumerate(train_loader):
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
-            outputs = model(xb)
-            loss = criterion(outputs, yb)
-            loss.backward()
-            optimizer.step()
+            with torch.cuda.amp.autocast():
+                outputs = model(xb)
+                loss = criterion(outputs, yb)
+
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             running_loss += loss.item() * xb.size(0)
             all_train_outputs.append(outputs.detach())
