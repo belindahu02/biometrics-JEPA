@@ -390,7 +390,7 @@ except Exception as e:
     raise
 
 # Final results processing
-if len(acc) > 0:
+if len(acc) >= len(variable):
     print(f"\n{'=' * 60}")
     print(f"Processing final results...")
     print(f"{'=' * 60}")
@@ -491,16 +491,6 @@ if len(acc) > 0:
             print(f"Mean Accuracy: {np.mean(all_acc):.4f} ± {np.std(all_acc):.4f}")
             print(f"Mean Kappa:    {np.mean(all_kappa):.4f} ± {np.std(all_kappa):.4f}")
             print(f"Total experiments: {len(all_acc)}")
-
-    # Clean up checkpoint files
-    try:
-        if os.path.exists(checkpoint_file):
-            os.remove(checkpoint_file)
-        if os.path.exists(results_backup_file):
-            os.remove(results_backup_file)
-        print("🧹 Checkpoint files cleaned up")
-    except Exception as e:
-        print(f"⚠️ Could not clean up some checkpoint files: {e}")
 
 else:
     print("❌ No results to save or plot")
