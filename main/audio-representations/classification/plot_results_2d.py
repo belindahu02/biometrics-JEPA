@@ -415,9 +415,8 @@ try:
             print(f"   Kappa:    {avg_kappa:.4f} ± {std_kappa:.4f} (n={len(kappa_temp)})")
 
             # Save intermediate results and plots every few iterations
-            if (i + 1) % 3 == 0:  # Every 3 sample sizes
-                save_intermediate_results(acc, kappa, i + 1)
-                print(f"💾 Intermediate results saved and plotted")
+            save_intermediate_results(acc, kappa, i + 1)
+            print(f"💾 Intermediate results saved and plotted")
 
         else:
             print(f"⚠️ No successful runs for {samples_per_user} samples/user")

@@ -109,22 +109,25 @@ def load_spectrogram_data_2d(data_path, user_ids, normalization='log_scale',
 
         user_spectrograms = []
         session_count = 0
+
+        # Loop over session folders like S001R01, S001R02, etc.
         for item in sorted(os.listdir(user_path)):
             session_path = os.path.join(user_path, item)
             if os.path.isdir(session_path) and item.startswith(user_folder + 'R'):
-                spec_file = os.path.join(session_path, "001_stacked.npy")
-                if os.path.exists(spec_file):
-                    try:
-                        spec = np.load(spec_file)
-                        # Handle both possible shapes
-                        if spec.shape == (4160, 768) or spec.shape == (520, 768):
-                            user_spectrograms.append(spec)
-                            session_count += 1
-                        else:
-                            print(f"Warning: {spec_file} has shape {spec.shape}, "
-                                  f"expected (4160, 768) or (520, 768)")
-                    except Exception as e:
-                        print(f"Error loading {spec_file}: {e}")
+                # Loop over all stacked files in the session folder
+                for npy_file in sorted(os.listdir(session_path)):
+                    if npy_file.endswith("_stacked.npy"):
+                        spec_file = os.path.join(session_path, npy_file)
+                        try:
+                            spec = np.load(spec_file)
+                            # Handle both possible shapes
+                            if spec.shape in [(4160, 768), (520, 768)]:
+                                user_spectrograms.append(spec)
+                                session_count += 1
+                            else:
+                                print(f"Warning: {spec_file} has shape {spec.shape}")
+                        except Exception as e:
+                            print(f"Error loading {spec_file}: {e}")
 
         if len(user_spectrograms) == 0:
             print(f"No valid spectrograms for user {user_id}")
@@ -174,6 +177,10 @@ def load_spectrogram_data_2d(data_path, user_ids, normalization='log_scale',
         n_samples = len(user_data)
         n_train = int(n_samples * 0.7)
         n_val = int(n_samples * 0.15)
+        n_test = n_samples - n_train - n_val
+        if n_test < 1:
+            n_test = 1
+            n_train = n_samples - n_val - n_test
 
         # Random permutation for splitting
         indices = np.random.permutation(n_samples)
