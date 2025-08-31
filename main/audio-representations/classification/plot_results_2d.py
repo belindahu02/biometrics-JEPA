@@ -111,61 +111,106 @@ def load_checkpoint():
 
 
 def save_intermediate_results(acc, kappa, current_idx):
-    """Save intermediate results that can be plotted"""
-    if len(acc) == 0:
+    """Save intermediate results that can be plotted, handling failed runs"""
+    # Check if we have any data at all
+    if len(acc) == 0 and len(kappa) == 0:
+        print("⚠️ No data to save yet (acc and kappa are both empty)")
         return
 
-    # Save using pickle to handle variable lengths
+    # Ensure we have at least some valid data
+    valid_acc_count = sum(1 for sublist in acc if len(sublist) > 0)
+    valid_kappa_count = sum(1 for sublist in kappa if len(sublist) > 0)
+
+    if valid_acc_count == 0 and valid_kappa_count == 0:
+        print("⚠️ No valid runs completed yet (all sublists are empty)")
+        return
+
+    print(
+        f"💾 Saving intermediate results: {valid_acc_count} valid accuracy runs, {valid_kappa_count} valid kappa runs")
+
+    # Save using pickle to handle variable lengths and empty sublists
     intermediate_file = os.path.join(OUTPUT_PATH, f"{model_name}_intermediate.pkl")
     import pickle
 
     intermediate_data = {
         'test_acc_list': acc,
         'kappa_score_list': kappa,
-        'variables_completed': variable[:current_idx]
+        'variables_completed': variable[:current_idx],
+        'valid_acc_runs': valid_acc_count,
+        'valid_kappa_runs': valid_kappa_count,
+        'total_attempted_runs': len(acc) * 10,  # Assuming 10 runs per sample size
+        'save_timestamp': datetime.now().isoformat()
     }
 
-    with open(intermediate_file, 'wb') as f:
-        pickle.dump(intermediate_data, f)
+    try:
+        with open(intermediate_file, 'wb') as f:
+            pickle.dump(intermediate_data, f)
+        print(f"✅ Intermediate data saved to {intermediate_file}")
+    except Exception as e:
+        print(f"❌ Failed to save intermediate data: {e}")
+        return
 
-    # Create intermediate plots
-    create_plots(acc, kappa, current_idx, suffix="_intermediate")
+    # Create intermediate plots only if we have valid data
+    try:
+        create_plots(acc, kappa, current_idx, suffix="_intermediate")
+        print(f"✅ Intermediate plots created")
+    except Exception as e:
+        print(f"⚠️ Could not create intermediate plots: {e}")
 
 
 def create_plots(acc, kappa, num_completed, suffix=""):
-    """Create plots with current results"""
-    if len(acc) == 0:
+    """Create plots with current results, handling empty sublists from failed runs"""
+    if len(acc) == 0 and len(kappa) == 0:
+        print("⚠️ No data available for plotting")
         return
 
     current_variables = variable[:num_completed]
 
-    # Handle variable-length sublists by taking maximum values when available
+    # Handle variable-length sublists and empty sublists from failed runs
     kappa_max = []
     acc_max = []
+    valid_variables = []
 
-    for i in range(min(len(acc), len(kappa))):
-        if len(acc[i]) > 0:
-            acc_max.append(np.max(acc[i]))
-        if len(kappa[i]) > 0:
-            kappa_max.append(np.max(kappa[i]))
+    for i in range(min(len(acc), len(kappa), len(current_variables))):
+        has_valid_acc = i < len(acc) and len(acc[i]) > 0
+        has_valid_kappa = i < len(kappa) and len(kappa[i]) > 0
 
-    # Ensure we have matching lengths
-    plot_variables = current_variables[:min(len(kappa_max), len(acc_max))]
-    kappa_max = kappa_max[:len(plot_variables)]
-    acc_max = acc_max[:len(plot_variables)]
+        # Only include data points where we have at least one valid result
+        if has_valid_acc or has_valid_kappa:
+            valid_variables.append(current_variables[i])
 
-    if len(kappa_max) == 0 or len(acc_max) == 0:
-        print("No valid results to plot yet")
+            if has_valid_acc:
+                acc_max.append(np.max(acc[i]))
+            else:
+                acc_max.append(np.nan)  # Use NaN for missing data
+
+            if has_valid_kappa:
+                kappa_max.append(np.max(kappa[i]))
+            else:
+                kappa_max.append(np.nan)  # Use NaN for missing data
+
+    if len(valid_variables) == 0:
+        print("⚠️ No valid data points available for plotting")
         return
+
+    print(f"📊 Plotting {len(valid_variables)} data points (some may have NaN values)")
 
     # Kappa plot
     plt.figure(figsize=(12, 8))
-    plt.plot(plot_variables, kappa_max, 'b', label=f'{model_name}', linewidth=2, marker='o')
+    # Plot with NaN handling - matplotlib will skip NaN points
+    plt.plot(valid_variables, kappa_max, 'b-o', label=f'{model_name}', linewidth=2, markersize=6)
     plt.title(f"Kappa Score vs {variable_name} (2D {NORMALIZATION_METHOD} normalization, {MODEL_TYPE} model){suffix}")
     plt.xlabel(variable_name)
     plt.ylabel("Kappa Score")
     plt.grid(True, alpha=0.3)
     plt.legend()
+
+    # Add text showing number of valid points
+    valid_kappa_count = np.sum(~np.isnan(kappa_max))
+    plt.text(0.02, 0.98, f'Valid points: {valid_kappa_count}/{len(valid_variables)}',
+             transform=plt.gca().transAxes, verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
     plt.tight_layout()
     output_graph = os.path.join(GRAPH_PATH, f"kappa_2d_{NORMALIZATION_METHOD}_{MODEL_TYPE}{suffix}.jpg")
     plt.savefig(output_graph, dpi=300, bbox_inches='tight')
@@ -173,16 +218,25 @@ def create_plots(acc, kappa, num_completed, suffix=""):
 
     # Accuracy plot
     plt.figure(figsize=(12, 8))
-    plt.plot(plot_variables, acc_max, 'b', label=f'{model_name}', linewidth=2, marker='o')
+    plt.plot(valid_variables, acc_max, 'r-s', label=f'{model_name}', linewidth=2, markersize=6)
     plt.title(f"Test Accuracy vs {variable_name} (2D {NORMALIZATION_METHOD} normalization, {MODEL_TYPE} model){suffix}")
     plt.xlabel(variable_name)
     plt.ylabel("Test Accuracy")
     plt.grid(True, alpha=0.3)
     plt.legend()
+
+    # Add text showing number of valid points
+    valid_acc_count = np.sum(~np.isnan(acc_max))
+    plt.text(0.02, 0.98, f'Valid points: {valid_acc_count}/{len(valid_variables)}',
+             transform=plt.gca().transAxes, verticalalignment='top',
+             bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.5))
+
     plt.tight_layout()
     output_graph = os.path.join(GRAPH_PATH, f"acc_2d_{NORMALIZATION_METHOD}_{MODEL_TYPE}{suffix}.jpg")
     plt.savefig(output_graph, dpi=300, bbox_inches='tight')
     plt.close()
+
+    print(f"✅ Plots saved with {valid_acc_count} valid accuracy points and {valid_kappa_count} valid kappa points")
 
 
 def compare_with_1d_results(acc, kappa):
