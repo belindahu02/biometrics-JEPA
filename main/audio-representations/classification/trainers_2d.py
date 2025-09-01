@@ -1,5 +1,5 @@
 # =============================================
-# Enhanced trainers_2d.py with Comprehensive Logging for 2D Spectrograms
+# Enhanced trainers_2d.py with Memory-Efficient Loading
 # =============================================
 
 import numpy as np
@@ -8,13 +8,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, TensorDataset
 from backbones_2d import SpectrogramResNet, LightweightSpectrogramResNet
-from data_loader_2d import load_spectrogram_data_2d, user_data_split_2d, global_normalize_2d, augment_spectrograms
+# Import the new memory-efficient functions
+from data_loader_2d_lazy import get_file_paths_and_labels, create_memory_efficient_dataloaders
 import os
 import json
 from datetime import datetime
 import time
 import logging
 import matplotlib.pyplot as plt
+import gc
 
 torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.enabled = True
@@ -134,25 +136,26 @@ def calculate_metrics(outputs, targets):
         return accuracy, per_class_acc, avg_confidence
 
 
+def get_memory_usage():
+    """Get current memory usage in GB"""
+    try:
+        import psutil
+        process = psutil.Process()
+        memory_mb = process.memory_info().rss / 1024 / 1024
+        return memory_mb / 1024  # Convert to GB
+    except ImportError:
+        return 0.0  # Return 0 if psutil not available
+
+
 def spectrogram_trainer_2d(samples_per_user, data_path, user_ids, normalization_method='log_scale',
                            model_type='lightweight', batch_size=16, epochs=100, lr=0.001, device=None,
-                           use_augmentation=False, save_model_checkpoints=True, checkpoint_every=10):
+                           use_augmentation=False, save_model_checkpoints=True, checkpoint_every=10,
+                           max_cache_size=100):
     """
-    Enhanced PyTorch 2D spectrogram trainer with comprehensive logging.
+    Memory-efficient PyTorch 2D spectrogram trainer.
 
-    Args:
-        samples_per_user: Number of samples per user for training
-        data_path: Path to spectrogram data
-        user_ids: List of user IDs to include
-        normalization_method: Method for normalizing spectrograms ('log_scale', 'min_max', 'z_score', 'decibel')
-        model_type: Type of model ('lightweight' or 'full')
-        batch_size: Batch size for training
-        epochs: Number of training epochs
-        lr: Initial learning rate
-        device: torch device ('cuda' or 'cpu')
-        use_augmentation: Whether to apply data augmentation
-        save_model_checkpoints: Whether to save model checkpoints during training
-        checkpoint_every: Save checkpoint every N epochs
+    NEW PARAMETERS:
+        max_cache_size: Maximum number of spectrograms to keep in memory cache (default: 100)
     """
     if device is None:
         if torch.cuda.is_available():
@@ -191,70 +194,88 @@ def spectrogram_trainer_2d(samples_per_user, data_path, user_ids, normalization_
         logger = setup_logging("./logs_2d")
 
     # --------------------------
-    # Load and preprocess data
+    # Create memory-efficient data loaders
     # --------------------------
-    logger.info("Loading and preprocessing 2D spectrogram data...")
+    logger.info("Creating memory-efficient data loaders...")
     start_time = time.time()
 
-    x_train, y_train, x_val, y_val, x_test, y_test, sessions, data_info = load_spectrogram_data_2d(
-        data_path, user_ids, normalization=normalization_method, add_channel_dim=True
-    )
+    # Log initial memory usage
+    initial_memory = get_memory_usage()
+    logger.info(f"Initial memory usage: {initial_memory:.2f} GB")
 
-    # Apply global normalization
-    x_train, x_val, x_test = global_normalize_2d(x_train, x_val, x_test)
-
-    # Limit samples per user
-    x_train, y_train = user_data_split_2d(x_train, y_train, samples_per_user=samples_per_user)
+    try:
+        train_loader, val_loader, test_loader, sessions = create_memory_efficient_dataloaders(
+            data_path=data_path,
+            user_ids=user_ids,
+            samples_per_user=samples_per_user,
+            normalization=normalization_method,
+            batch_size=batch_size,
+            augment_train=use_augmentation,
+            cache_size=max_cache_size
+        )
+    except Exception as e:
+        logger.error(f"Error creating data loaders: {e}")
+        raise
 
     data_load_time = time.time() - start_time
-    logger.info(f"Data loading completed in {data_load_time:.2f}s")
-    logger.info(f"Train shape: {x_train.shape}, Val shape: {x_val.shape}, Test shape: {x_test.shape}")
-    logger.info(f"Spectrogram dimensions: {x_train.shape[2:]} (height x width)")
-    logger.info(f"Class distribution - Train: {np.bincount(y_train)}")
-    logger.info(f"Class distribution - Val: {np.bincount(y_val)}")
-    logger.info(f"Class distribution - Test: {np.bincount(y_test)}")
+    logger.info(f"Data loader creation completed in {data_load_time:.2f}s")
 
-    # Convert to PyTorch tensors
-    x_train = torch.tensor(x_train, dtype=torch.float32)
-    y_train = torch.tensor(y_train, dtype=torch.long)
-    x_val = torch.tensor(x_val, dtype=torch.float32)
-    y_val = torch.tensor(y_val, dtype=torch.long)
-    x_test = torch.tensor(x_test, dtype=torch.float32)
-    y_test = torch.tensor(y_test, dtype=torch.long)
+    # Log memory usage after data loader creation
+    post_loader_memory = get_memory_usage()
+    logger.info(f"Memory usage after data loader creation: {post_loader_memory:.2f} GB")
 
-    # Apply data augmentation to training data if requested
-    if use_augmentation:
-        logger.info("Applying data augmentation...")
-        x_train_aug = augment_spectrograms(x_train.numpy(), augmentations=['time_mask', 'freq_mask', 'noise'])
-        x_train = torch.tensor(x_train_aug, dtype=torch.float32)
+    # Get dataset sizes and a sample to determine input shape
+    train_size = len(train_loader.dataset)
+    val_size = len(val_loader.dataset)
+    test_size = len(test_loader.dataset)
 
-    # Create DataLoaders
-    train_loader = DataLoader(TensorDataset(x_train, y_train), batch_size=batch_size, shuffle=True)
+    logger.info(f"Dataset sizes - Train: {train_size}, Val: {val_size}, Test: {test_size}")
+
+    # Get sample batch to determine input shape
+    sample_batch = next(iter(train_loader))
+    input_shape = sample_batch[0].shape[1:]  # Remove batch dimension
+    num_classes = len(user_ids)
+
+    logger.info(f"Input shape: {input_shape}")
+    logger.info(f"Number of classes: {num_classes}")
+    logger.info(f"Spectrogram dimensions: {input_shape[1:]} (height x width)")
+
+    # Convert to PyTorch tensors - THIS IS NO LONGER NEEDED since the dataset handles it
+    # The data loaders already return tensors
+
+    # Create DataLoaders - ALREADY DONE ABOVE
+    # Update settings for memory efficiency
     train_loader = DataLoader(
-        TensorDataset(x_train, y_train),
-        batch_size=batch_size, shuffle=True,
-        num_workers=4, pin_memory=True
+        train_loader.dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=0,  # Reduced from 4 to avoid memory issues
+        pin_memory=False,  # Disabled to save memory
+        persistent_workers=False
     )
     val_loader = DataLoader(
-        TensorDataset(x_val, y_val),
+        val_loader.dataset,
         batch_size=batch_size,
-        num_workers=4, pin_memory=True
+        num_workers=0,
+        pin_memory=False,
+        persistent_workers=False
     )
     test_loader = DataLoader(
-        TensorDataset(x_test, y_test),
+        test_loader.dataset,
         batch_size=batch_size,
-        num_workers=4, pin_memory=True
+        num_workers=0,
+        pin_memory=False,
+        persistent_workers=False
     )
 
-    num_classes = len(np.unique(y_train.numpy()))
-    logger.info(f"Number of classes: {num_classes}")
     logger.info(f"Batch size: {batch_size}, Total batches per epoch: {len(train_loader)}")
     logger.info(f"Using augmentation: {use_augmentation}")
+    logger.info(f"Cache size: {max_cache_size}")
 
     # --------------------------
     # Build model
     # --------------------------
-    input_channels = x_train.shape[1]  # Should be 1 for grayscale spectrograms
+    input_channels = input_shape[0]  # Should be 1 for grayscale spectrograms
 
     if model_type == 'lightweight':
         model = LightweightSpectrogramResNet(
@@ -340,7 +361,6 @@ def spectrogram_trainer_2d(samples_per_user, data_path, user_ids, normalization_
         # Save regular checkpoint
         checkpoint_path = os.path.join(run_checkpoint_dir, f'checkpoint_epoch_{epoch}.pt')
         torch.save(checkpoint, checkpoint_path)
-        scaler = torch.cuda.amp.GradScaler()
 
         # Save best model separately
         if is_best:
@@ -356,12 +376,13 @@ def spectrogram_trainer_2d(samples_per_user, data_path, user_ids, normalization_
                 os.remove(os.path.join(run_checkpoint_dir, old_checkpoint))
 
     # --------------------------
-    # Training loop
+    # Training loop with memory management
     # --------------------------
     logger.info(f"Starting training for {epochs} epochs...")
     logger.info(f"Early stopping patience: {early_stopping_patience}")
 
     training_start_time = time.time()
+    scaler = torch.cuda.amp.GradScaler() if device == 'cuda' else None
 
     for epoch in range(epochs):
         epoch_start_time = time.time()
@@ -372,26 +393,53 @@ def spectrogram_trainer_2d(samples_per_user, data_path, user_ids, normalization_
         all_train_outputs = []
         all_train_targets = []
 
+        # Memory cleanup before epoch
+        if device == 'cuda':
+            torch.cuda.empty_cache()
+        gc.collect()
+
         for batch_idx, (xb, yb) in enumerate(train_loader):
             xb, yb = xb.to(device), yb.to(device)
             optimizer.zero_grad()
-            with torch.cuda.amp.autocast():
+
+            if scaler and device == 'cuda':
+                with torch.cuda.amp.autocast():
+                    outputs = model(xb)
+                    loss = criterion(outputs, yb)
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
                 outputs = model(xb)
                 loss = criterion(outputs, yb)
-
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+                loss.backward()
+                optimizer.step()
 
             running_loss += loss.item() * xb.size(0)
-            all_train_outputs.append(outputs.detach())
-            all_train_targets.append(yb.detach())
+            all_train_outputs.append(outputs.detach().cpu())  # Move to CPU to save GPU memory
+            all_train_targets.append(yb.detach().cpu())
+
+            # Periodic memory cleanup
+            if batch_idx % 20 == 0:
+                if device == 'cuda':
+                    torch.cuda.empty_cache()
+                gc.collect()
+
+                # Log memory usage periodically
+                if batch_idx % 100 == 0:
+                    current_memory = get_memory_usage()
+                    logger.debug(f"Epoch {epoch + 1}, Batch {batch_idx}: Memory usage: {current_memory:.2f} GB")
 
         # Calculate training metrics
-        all_train_outputs = torch.cat(all_train_outputs)
-        all_train_targets = torch.cat(all_train_targets)
+        all_train_outputs = torch.cat(all_train_outputs).to(device)
+        all_train_targets = torch.cat(all_train_targets).to(device)
         train_acc, per_class_train_acc, train_confidence = calculate_metrics(all_train_outputs, all_train_targets)
-        epoch_loss = running_loss / len(x_train)
+        epoch_loss = running_loss / train_size
+
+        # Clear training outputs from memory
+        del all_train_outputs, all_train_targets
+        if device == 'cuda':
+            torch.cuda.empty_cache()
 
         # Validation phase
         model.eval()
@@ -400,18 +448,27 @@ def spectrogram_trainer_2d(samples_per_user, data_path, user_ids, normalization_
         all_val_targets = []
 
         with torch.no_grad():
-            for xb, yb in val_loader:
+            for batch_idx, (xb, yb) in enumerate(val_loader):
                 xb, yb = xb.to(device), yb.to(device)
                 outputs = model(xb)
                 loss = criterion(outputs, yb)
                 val_loss += loss.item() * xb.size(0)
-                all_val_outputs.append(outputs)
-                all_val_targets.append(yb)
+                all_val_outputs.append(outputs.cpu())  # Move to CPU
+                all_val_targets.append(yb.cpu())
 
-        all_val_outputs = torch.cat(all_val_outputs)
-        all_val_targets = torch.cat(all_val_targets)
+                # Memory cleanup during validation too
+                if batch_idx % 20 == 0 and device == 'cuda':
+                    torch.cuda.empty_cache()
+
+        all_val_outputs = torch.cat(all_val_outputs).to(device)
+        all_val_targets = torch.cat(all_val_targets).to(device)
         val_acc, per_class_val_acc, val_confidence = calculate_metrics(all_val_outputs, all_val_targets)
-        val_loss /= len(x_val)
+        val_loss /= val_size
+
+        # Clear validation outputs from memory
+        del all_val_outputs, all_val_targets
+        if device == 'cuda':
+            torch.cuda.empty_cache()
 
         # Learning rate scheduling
         current_lr = optimizer.param_groups[0]['lr']
@@ -433,18 +490,20 @@ def spectrogram_trainer_2d(samples_per_user, data_path, user_ids, normalization_
         is_best = val_acc > best_val_acc
         if is_best:
             best_val_acc = val_acc
-            best_model_state = model.state_dict()
+            best_model_state = model.state_dict().copy()  # Make a copy
             epochs_without_improvement = 0
         else:
             epochs_without_improvement += 1
 
         # Calculate epoch time
         epoch_time = time.time() - epoch_start_time
+        current_memory = get_memory_usage()
 
         # Detailed logging every epoch
         if (epoch + 1) % 5 == 0 or epoch == 0 or is_best:
             logger.info(f"Epoch {epoch + 1:3d}/{epochs} | "
                         f"Time: {epoch_time:.1f}s | "
+                        f"Memory: {current_memory:.1f}GB | "
                         f"LR: {current_lr:.2e} | "
                         f"Train Loss: {epoch_loss:.4f} | "
                         f"Train Acc: {train_acc:.4f} | "
@@ -473,6 +532,11 @@ def spectrogram_trainer_2d(samples_per_user, data_path, user_ids, normalization_
         if save_model_checkpoints and (epoch + 1) % 25 == 0:
             plot_path = os.path.join(run_checkpoint_dir, f'training_curves_epoch_{epoch + 1}.png')
             plot_training_curves(training_history, plot_path)
+
+        # Memory cleanup at end of epoch
+        if device == 'cuda':
+            torch.cuda.empty_cache()
+        gc.collect()
 
     # Training completed
     total_training_time = time.time() - training_start_time
@@ -512,7 +576,7 @@ def spectrogram_trainer_2d(samples_per_user, data_path, user_ids, normalization_
         model.load_state_dict(best_model_state)
         logger.info("Loaded best model for final evaluation")
 
-    # Evaluation on test set
+    # Evaluation on test set with memory management
     logger.info("Starting final evaluation on test set...")
     model.eval()
     test_loss = 0.0
@@ -520,25 +584,35 @@ def spectrogram_trainer_2d(samples_per_user, data_path, user_ids, normalization_
     all_test_targets = []
 
     with torch.no_grad():
-        for xb, yb in test_loader:
+        for batch_idx, (xb, yb) in enumerate(test_loader):
             xb, yb = xb.to(device), yb.to(device)
             outputs = model(xb)
             loss = criterion(outputs, yb)
             test_loss += loss.item() * xb.size(0)
-            all_test_outputs.append(outputs)
-            all_test_targets.append(yb)
+            all_test_outputs.append(outputs.cpu())  # Move to CPU
+            all_test_targets.append(yb.cpu())
 
-    all_test_outputs = torch.cat(all_test_outputs)
-    all_test_targets = torch.cat(all_test_targets)
+            # Memory cleanup during test evaluation
+            if batch_idx % 20 == 0 and device == 'cuda':
+                torch.cuda.empty_cache()
+
+    all_test_outputs = torch.cat(all_test_outputs).to(device)
+    all_test_targets = torch.cat(all_test_targets).to(device)
     test_acc, per_class_test_acc, test_confidence = calculate_metrics(all_test_outputs, all_test_targets)
-    test_loss /= len(x_test)
+    test_loss /= test_size
 
     # Compute Cohen's Kappa
-    all_preds = all_test_outputs.argmax(dim=1).cpu().numpy()
-    y_true = all_test_targets.cpu().numpy()
+    all_preds = all_test_outputs.argmax(dim=1).cpu().numpy().astype(int)
+    y_true = all_test_targets.cpu().numpy().astype(int)
+
     po = np.mean(all_preds == y_true)
-    pe = np.sum(np.bincount(y_true) * np.bincount(all_preds)) / (len(y_true) ** 2)
-    kappa_score = (po - pe) / (1 - pe) if pe != 1 else 0
+
+    # Force both vectors to length = num_classes
+    true_counts = np.bincount(y_true, minlength=num_classes)
+    pred_counts = np.bincount(all_preds, minlength=num_classes)
+
+    pe = np.sum(true_counts * pred_counts) / (len(y_true) ** 2)
+    kappa_score = (po - pe) / (1 - pe) if pe < 1 else 0.0
 
     logger.info("=== FINAL RESULTS ===")
     logger.info(f"Test Loss: {test_loss:.4f}")
@@ -546,6 +620,10 @@ def spectrogram_trainer_2d(samples_per_user, data_path, user_ids, normalization_
     logger.info(f"Cohen's Kappa: {kappa_score:.4f}")
     logger.info(f"Test Confidence: {test_confidence:.3f}")
     logger.info(f"Per-class Test Acc: {[f'{acc:.3f}' for acc in per_class_test_acc]}")
+
+    # Log final memory usage
+    final_memory = get_memory_usage()
+    logger.info(f"Final memory usage: {final_memory:.2f} GB")
 
     # Save final results
     if save_model_checkpoints:
@@ -565,12 +643,19 @@ def spectrogram_trainer_2d(samples_per_user, data_path, user_ids, normalization_
             'use_augmentation': use_augmentation,
             'early_stopped': epochs_without_improvement >= early_stopping_patience,
             'final_lr': float(current_lr),
-            'data_info': data_info
+            'max_cache_size': max_cache_size,
+            'memory_efficient': True
         }
         results_file = os.path.join(run_checkpoint_dir, 'final_results.json')
         with open(results_file, 'w') as f:
             json.dump(final_results, f, indent=2)
 
         logger.info(f"2D Training completed. All files saved to: {run_checkpoint_dir}")
+
+    # Final cleanup
+    del all_test_outputs, all_test_targets
+    if device == 'cuda':
+        torch.cuda.empty_cache()
+    gc.collect()
 
     return test_acc, kappa_score

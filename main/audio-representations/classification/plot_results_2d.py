@@ -11,33 +11,34 @@ import time
 from datetime import datetime
 
 # Configuration
-DATA_PATH = "/app/data/grouped_embeddings"
-OUTPUT_PATH = "/app/data/graph_data_2d"
-GRAPH_PATH = "/app/data/graph_2d"
-CHECKPOINT_PATH = "/app/data/graph_checkpoints_2d"
-
-# DATA_PATH = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/classification_input"
-# OUTPUT_PATH = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/graph_data_2d"
-# GRAPH_PATH = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/graphs_2d"
-# CHECKPOINT_PATH = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/graph_checkpoints_2d"
+# DATA_PATH = "/app/data/grouped_embeddings"
+# OUTPUT_PATH = "/app/data/graph_data_2d"
+# GRAPH_PATH = "/app/data/graph_2d"
+# CHECKPOINT_PATH = "/app/data/graph_checkpoints_2d"
+#
+DATA_PATH = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/classification_input"
+OUTPUT_PATH = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/graph_data_2d"
+GRAPH_PATH = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/graphs_2d"
+CHECKPOINT_PATH = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/graph_checkpoints_2d"
 
 # Create directories
 os.makedirs(OUTPUT_PATH, exist_ok=True)
 os.makedirs(GRAPH_PATH, exist_ok=True)
 os.makedirs(CHECKPOINT_PATH, exist_ok=True)
 
-USER_IDS = list(range(1, 110))  # Increased to more users for better evaluation
-NORMALIZATION_METHOD = 'log_scale'  # Changed from CONVERSION_METHOD to NORMALIZATION_METHOD
-MODEL_TYPE = 'lightweight'  # Options: 'lightweight', 'full'
+USER_IDS = list(range(1, 2))  # Increased to more users for better evaluation
+NORMALIZATION_METHOD = 'none'  # Changed from CONVERSION_METHOD to NORMALIZATION_METHOD
+MODEL_TYPE = 'full'  # Options: 'lightweight', 'full'
 
 variable_name = "samples per user"
 model_name = f"spectrogram_2d_{NORMALIZATION_METHOD}_{MODEL_TYPE}"
-variable = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 14, 16, 18, 20, 24, 28, 32, 36, 40, 45, 50, 55, 60]
+variable_percentages = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100]
+TOTAL_SAMPLES_PER_USER = 133 #142
+variable = [max(1, round(p / 100 * TOTAL_SAMPLES_PER_USER)) for p in variable_percentages]
 
 # Checkpoint file names
 checkpoint_file = os.path.join(CHECKPOINT_PATH, f"{model_name}_checkpoint.json")
 results_backup_file = os.path.join(CHECKPOINT_PATH, f"{model_name}_results_backup.pkl")
-
 
 def save_checkpoint(current_idx, current_itr, acc, kappa, experiment_start_time):
     """Save current progress to checkpoint file"""
@@ -359,17 +360,21 @@ try:
 
             try:
                 # Call 2D trainer with updated parameters
+
                 test_acc, kappa_score = spectrogram_trainer_2d(
-                    samples_per_user=samples_per_user,
+                    samples_per_user=samples_per_user,  # Start smaller than before
                     data_path=DATA_PATH,
                     user_ids=USER_IDS,
-                    normalization_method=NORMALIZATION_METHOD,  # Updated parameter name
-                    model_type=MODEL_TYPE,  # New parameter
-                    epochs=100,  # Standard epochs for 2D (may need fewer due to no compression)
+                    normalization_method=NORMALIZATION_METHOD,
+                    model_type=MODEL_TYPE,  # Use lightweight model
                     batch_size=8 if MODEL_TYPE == 'full' else 16,  # Adjust batch size based on model
+                    epochs=100,
                     lr=0.001,
-                    use_augmentation=True,  # New parameter for data augmentation
-                    device='cuda'  # Specify device
+                    device='cuda',  # or 'cpu'
+                    use_augmentation=True,  # Start without augmentation
+                    save_model_checkpoints=True,
+                    checkpoint_every=10,
+                    max_cache_size=50  # NEW PARAMETER - keep only 50 spectrograms in cache
                 )
 
                 acc_temp.append(test_acc)
