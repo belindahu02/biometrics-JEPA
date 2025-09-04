@@ -146,6 +146,62 @@ def get_memory_usage():
     except ImportError:
         return 0.0  # Return 0 if psutil not available
 
+def save_confusion_matrix_torch(y_true, y_pred, num_classes, save_path, class_names=None):
+    # Initialize confusion matrix
+    cm = torch.zeros(num_classes, num_classes, dtype=torch.int64)
+
+    for t, p in zip(y_true, y_pred):
+        cm[t, p] += 1
+
+    cm = cm.numpy()
+
+    # Save raw confusion matrix as CSV for later use
+    csv_path = save_path.replace(".png", ".csv")
+    np.savetxt(csv_path, cm, delimiter=",", fmt="%d")
+
+    # Normalize per row (to show proportions)
+    with np.errstate(all='ignore'):
+        cm_normalized = cm.astype(np.float32) / cm.sum(axis=1, keepdims=True)
+    cm_normalized = np.nan_to_num(cm_normalized)
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(10, 10))
+    im = ax.imshow(cm, interpolation="nearest", cmap="Blues")
+    plt.colorbar(im, ax=ax)
+
+    # Tick marks
+    if class_names is None:
+        class_names = [str(i) for i in range(num_classes)]
+    ax.set_xticks(np.arange(num_classes))
+    ax.set_yticks(np.arange(num_classes))
+    ax.set_xticklabels(class_names, rotation=45, ha="right")
+    ax.set_yticklabels(class_names)
+
+    # Labels
+    ax.set_xlabel("Predicted label")
+    ax.set_ylabel("True label")
+    ax.set_title("Confusion Matrix")
+
+    # Annotate only non-zero cells
+    thresh = cm_normalized.max() / 2.
+    for i in range(num_classes):
+        for j in range(num_classes):
+            if cm[i, j] > 0:
+                ax.text(j, i, f"{cm_normalized[i, j]:.2f}",
+                        ha="center", va="center",
+                        color="white" if cm_normalized[i, j] > thresh else "black",
+                        fontsize=6)
+
+    step = max(1, num_classes // 20)  # show ~20 ticks max
+    ax.set_xticks(np.arange(0, num_classes, step))
+    ax.set_yticks(np.arange(0, num_classes, step))
+    ax.set_xticklabels([class_names[i] for i in range(0, num_classes, step)], rotation=45, ha="right")
+    ax.set_yticklabels([class_names[i] for i in range(0, num_classes, step)])
+
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close(fig)
+
 
 def spectrogram_trainer_2d(samples_per_user, data_path, user_ids, normalization_method='log_scale',
                            model_type='lightweight', batch_size=16, epochs=100, lr=0.001, device=None,
@@ -625,6 +681,22 @@ def spectrogram_trainer_2d(samples_per_user, data_path, user_ids, normalization_
     final_memory = get_memory_usage()
     logger.info(f"Final memory usage: {final_memory:.2f} GB")
 
+    # Collect labels and predictions
+    all_preds = []
+    all_labels = []
+    with torch.no_grad():
+        for inputs, labels in val_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            _, preds = torch.max(outputs, 1)
+            all_preds.extend(preds.cpu().tolist())
+            all_labels.extend(labels.cpu().tolist())
+
+    # Save confusion matrix
+    cm_path = os.path.join(run_checkpoint_dir, f"confusion_matrix_epoch_{epoch + 1}.png")
+    save_confusion_matrix_torch(all_labels, all_preds, num_classes=num_classes, save_path=cm_path,
+                                class_names=user_ids)
+
     # Save final results
     if save_model_checkpoints:
         final_results = {
@@ -659,3 +731,5 @@ def spectrogram_trainer_2d(samples_per_user, data_path, user_ids, normalization_
     gc.collect()
 
     return test_acc, kappa_score
+
+

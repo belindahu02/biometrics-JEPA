@@ -7,9 +7,9 @@ from collections import defaultdict
 # ---------------------------------------------------------------------------- #
 # embeddings_root = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/eval_embeddings"
 # output_root = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/classification_input"
-embeddings_root = "/media/SATA_2/belinda_hu/data/eval_embeddings"   # root of per-frame embeddings
-output_root = "/media/SATA_2/belinda_hu/grouped_embeddings"              # where to save stacked embeddings
-os.makedirs(output_root, exist_ok=True)
+embeddings_root = "/app/logs/eval_embeddings"   # root of per-frame embeddings
+output_root = "/app/logs/grouped_embeddings"              # where to save stacked embeddings
+# os.makedirs(output_root, exist_ok=True)
 #
 # ---------------------------------------------------------------------------- #
 # Walk through all leaf folders
@@ -42,3 +42,4 @@ for root, dirs, files in os.walk(embeddings_root):
         print(f"✅ Saved {save_path}: stacked shape {stacked.shape} from {len(frame_files)} files")
 
     print(f"✅ Processed {root}: {len(frames_dict)} frames stacked")
+
