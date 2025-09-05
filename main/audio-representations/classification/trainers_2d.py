@@ -21,6 +21,8 @@ import gc
 torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.enabled = True
 
+OUTPUT_DIR="/app/data/model_checkpoints_2d"
+
 def setup_logging(log_dir):
     """Setup comprehensive logging for training"""
     os.makedirs(log_dir, exist_ok=True)
@@ -233,13 +235,12 @@ def spectrogram_trainer_2d(samples_per_user, data_path, user_ids, normalization_
 
     # Create checkpoint directory
     if save_model_checkpoints:
-        checkpoint_dir = os.path.join(os.path.dirname(data_path), "model_checkpoints_2d")
-        os.makedirs(checkpoint_dir, exist_ok=True)
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
 
         # Create unique identifier for this training run
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_id = f"{normalization_method}_{model_type}_{samples_per_user}samples_{timestamp}"
-        run_checkpoint_dir = os.path.join(checkpoint_dir, run_id)
+        run_checkpoint_dir = os.path.join(OUTPUT_DIR, run_id)
         os.makedirs(run_checkpoint_dir, exist_ok=True)
 
         # Setup logging
@@ -681,22 +682,6 @@ def spectrogram_trainer_2d(samples_per_user, data_path, user_ids, normalization_
     final_memory = get_memory_usage()
     logger.info(f"Final memory usage: {final_memory:.2f} GB")
 
-    # Collect labels and predictions
-    all_preds = []
-    all_labels = []
-    with torch.no_grad():
-        for inputs, labels in val_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            outputs = model(inputs)
-            _, preds = torch.max(outputs, 1)
-            all_preds.extend(preds.cpu().tolist())
-            all_labels.extend(labels.cpu().tolist())
-
-    # Save confusion matrix
-    cm_path = os.path.join(run_checkpoint_dir, f"confusion_matrix_epoch_{epoch + 1}.png")
-    save_confusion_matrix_torch(all_labels, all_preds, num_classes=num_classes, save_path=cm_path,
-                                class_names=user_ids)
-
     # Save final results
     if save_model_checkpoints:
         final_results = {
@@ -723,6 +708,52 @@ def spectrogram_trainer_2d(samples_per_user, data_path, user_ids, normalization_
             json.dump(final_results, f, indent=2)
 
         logger.info(f"2D Training completed. All files saved to: {run_checkpoint_dir}")
+
+    # --------------------------
+    # Confusion Matrices (Train + Test)
+    # --------------------------
+    logger.info("Generating confusion matrices...")
+
+    # --- Training confusion matrix ---
+    all_train_preds, all_train_labels = [], []
+    model.eval()
+    with torch.no_grad():
+        for inputs, labels in train_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            _, preds = torch.max(outputs, 1)
+            all_train_preds.extend(preds.cpu().tolist())
+            all_train_labels.extend(labels.cpu().tolist())
+
+    train_cm_path = os.path.join(run_checkpoint_dir, "train_confusion_matrix.png")
+    save_confusion_matrix_torch(
+        all_train_labels,
+        all_train_preds,
+        num_classes=num_classes,
+        save_path=train_cm_path,
+        class_names=user_ids
+    )
+    logger.info(f"Saved training confusion matrix to {train_cm_path}")
+
+    # --- Test confusion matrix ---
+    all_test_preds, all_test_labels = [], []
+    with torch.no_grad():
+        for inputs, labels in test_loader:
+            inputs, labels = inputs.to(device), labels.to(device)
+            outputs = model(inputs)
+            _, preds = torch.max(outputs, 1)
+            all_test_preds.extend(preds.cpu().tolist())
+            all_test_labels.extend(labels.cpu().tolist())
+
+    test_cm_path = os.path.join(run_checkpoint_dir, "test_confusion_matrix.png")
+    save_confusion_matrix_torch(
+        all_test_labels,
+        all_test_preds,
+        num_classes=num_classes,
+        save_path=test_cm_path,
+        class_names=user_ids
+    )
+    logger.info(f"Saved test confusion matrix to {test_cm_path}")
 
     # Final cleanup
     del all_test_outputs, all_test_targets
