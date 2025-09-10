@@ -21,7 +21,7 @@ import gc
 torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.enabled = True
 
-OUTPUT_DIR="/app/data/model_checkpoints_2d"
+OUTPUT_DIR = "/app/data/model_checkpoints_2d"
 
 def setup_logging(log_dir):
     """Setup comprehensive logging for training"""

@@ -4,6 +4,7 @@ defaults:
   - model_summary
   - progress_bar
   - _self_
+  -  early_stopping
 
 model_summary:
   max_depth: 1
