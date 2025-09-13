@@ -71,8 +71,15 @@ def main(cfg: DictConfig):
     # instantiate model
     log("Instantiating model...")
     model = hydra.utils.instantiate(cfg.model)
-    model.eval()
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Load pretrained weights
+    checkpoint_path = "/app/data/jepa_logs_subset10/xps/97d170e1/checkpoints/last.ckpt"
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(checkpoint["state_dict"])  # or just checkpoint if it's the state dict directly
+
+    model.eval()
     model.to(device)
     log("Model instantiated and moved to device.")
 
@@ -84,7 +91,7 @@ def main(cfg: DictConfig):
     dataloader = DataLoader(dataset, batch_size=16, shuffle=False, num_workers=4)
     log(f"Dataset loaded with {len(dataset)} samples.")
 
-    embeddings_dir = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/eval_embeddings"
+    embeddings_dir = "/Users/belindahu/Desktop/thesis/biometrics-JE PA/main/audio-representations/data/eval_embeddings"
     os.makedirs(embeddings_dir, exist_ok=True)
     log(f"Embeddings directory ready at {embeddings_dir}")
 
