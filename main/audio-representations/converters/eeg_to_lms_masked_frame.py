@@ -246,10 +246,10 @@ def convert_eeg_batch(base_from_dir, base_to_dir,
 if __name__ == "__main__":
     mp.set_start_method('spawn', force=True)
     convert_eeg_batch(
-        "/Users/belindahu/Desktop/thesis/biometrics-JEPA/mmi/dataset/physionet.org/files/eegmmidb/1.0.0",
-        "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/masked_frames",
+        "/app/1.0.0",
+        "/app/data/masked_subset10_frames",
         start_subject_id=1,
-        end_subject_id=1,
+        end_subject_id=10,
         verbose=True,
         enable_masking=True
     )

@@ -205,7 +205,7 @@ def save_confusion_matrix_torch(y_true, y_pred, num_classes, save_path, class_na
     plt.close(fig)
 
 
-def spectrogram_trainer_2d(samples_per_user, data_path, user_ids, normalization_method='log_scale',
+def spectrogram_trainer_2d(samples_per_user, data_path, user_ids, normalization_method='log_scale', model_path=OUTPUT_DIR,
                            model_type='lightweight', batch_size=16, epochs=100, lr=0.001, device=None,
                            use_augmentation=False, save_model_checkpoints=True, checkpoint_every=10,
                            max_cache_size=100):
@@ -235,12 +235,12 @@ def spectrogram_trainer_2d(samples_per_user, data_path, user_ids, normalization_
 
     # Create checkpoint directory
     if save_model_checkpoints:
-        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        os.makedirs(model_path, exist_ok=True)
 
         # Create unique identifier for this training run
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         run_id = f"{normalization_method}_{model_type}_{samples_per_user}samples_{timestamp}"
-        run_checkpoint_dir = os.path.join(OUTPUT_DIR, run_id)
+        run_checkpoint_dir = os.path.join(model_path, run_id)
         os.makedirs(run_checkpoint_dir, exist_ok=True)
 
         # Setup logging

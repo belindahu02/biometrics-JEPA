@@ -42,7 +42,7 @@ def plot_mask_verification(original_path, masked_path, out_dir="mask_debug"):
     print(f"✅ Saved: {out_file}")
 
 
-def batch_verify(original_dir, masked_dir, out_dir="frame_mask_debug"):
+def batch_verify(original_dir, masked_dir, out_dir="frame_mask_debug_prod"):
     os.makedirs(out_dir, exist_ok=True)
 
     for fname in os.listdir(original_dir):
@@ -62,6 +62,6 @@ def batch_verify(original_dir, masked_dir, out_dir="frame_mask_debug"):
 if __name__ == "__main__":
     # Example usage (update these paths):
     original_dir = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/S001/S001R01"
-    masked_dir   = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/masked_frames/S001/S001R01"
+    masked_dir   = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/S001_prod/S001R01"
 
     batch_verify(original_dir, masked_dir)

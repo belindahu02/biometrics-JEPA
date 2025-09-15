@@ -15,11 +15,13 @@ from datetime import datetime
 # OUTPUT_PATH = "/app/data/graph_data_2d"
 # GRAPH_PATH = "/app/data/graph_2d"
 # CHECKPOINT_PATH = "/app/data/graph_checkpoints_2d"
-#
+# MODEL_PATH = "/app/data/model_checkpoints_2d"
+
 DATA_PATH = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/classification_input"
 OUTPUT_PATH = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/graph_data_2d"
 GRAPH_PATH = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/graphs_2d"
 CHECKPOINT_PATH = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/graph_checkpoints_2d"
+MODEL_PATH = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/model_checkpoints_2d"
 
 # Create directories
 os.makedirs(OUTPUT_PATH, exist_ok=True)
@@ -364,6 +366,7 @@ try:
                 test_acc, kappa_score = spectrogram_trainer_2d(
                     samples_per_user=samples_per_user,  # Start smaller than before
                     data_path=DATA_PATH,
+                    model_path=MODEL_PATH,
                     user_ids=USER_IDS,
                     normalization_method=NORMALIZATION_METHOD,
                     model_type=MODEL_TYPE,  # Use lightweight model

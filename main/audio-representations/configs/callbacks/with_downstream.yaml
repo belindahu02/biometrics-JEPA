@@ -1,0 +1,51 @@
+# configs/callbacks/with_downstream.yaml
+# This extends your default callbacks with downstream evaluation
+
+defaults:
+  - default.yaml  # Include all your existing callbacks
+  - _self_
+
+# Add the downstream evaluation callback
+downstream_evaluation_callback:
+  _target_: src.callbacks.classifier_callback.DownstreamEvaluationCallback
+  eval_every_n_epochs: ${downstream_evaluation.eval_every_n_epochs}
+  classification_scripts_dir: ${downstream_evaluation.classification_scripts_dir}
+  eval_data_dir: ${paths.data_dir}
+  temp_checkpoint_dir: ${paths.output_dir}/temp_downstream_checkpoints
+  results_dir: ${paths.output_dir}/downstream_results
+  metric_name: "downstream_accuracy"
+  mode: "max"
+  save_top_k: ${downstream_evaluation.save_top_k}
+  verbose: ${downstream_evaluation.verbose}
+
+  # Evaluation parameters
+  samples_per_user: ${downstream_evaluation.samples_per_user}
+  n_runs: ${downstream_evaluation.n_runs}
+  epochs_per_run: ${downstream_evaluation.epochs_per_run}
+  normalization_method: ${downstream_evaluation.normalization_method}
+  model_type: ${downstream_evaluation.model_type}
+  user_ids: ${downstream_evaluation.user_ids}
+  cleanup_temp_checkpoints: ${downstream_evaluation.cleanup_temp_checkpoints}
+
+# Conditionally add downstream-specific callbacks
+# These will only be active when downstream_evaluation.enabled is true
+model_checkpoint_downstream:
+  _target_: lightning.pytorch.callbacks.ModelCheckpoint
+  dirpath: ${paths.output_dir}/checkpoints/downstream_best
+  filename: "downstream-best-{downstream_accuracy:.4f}-epoch-{epoch}"
+  monitor: "downstream_accuracy"
+  mode: "max"
+  save_top_k: ${downstream_evaluation.save_top_k}
+  save_last: false  # We already have save_last in default checkpoint
+  auto_insert_metric_name: false
+  verbose: true
+  save_on_train_epoch_end: null  # Only save when metric is available
+
+early_stopping_downstream:
+  _target_: lightning.pytorch.callbacks.EarlyStopping
+  monitor: "downstream_accuracy"
+  patience: ${downstream_evaluation.early_stopping_patience}
+  mode: "max"
+  min_delta: 0.001
+  verbose: true
+  strict: false

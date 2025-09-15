@@ -119,8 +119,23 @@ class SpectrogramResNet(nn.Module):
 
 
 # Lightweight version for smaller spectrograms
+class LightweightSpectrogramResNet(nn.Module):
+    def __init__(self, input_channels=1, num_classes=10, channels=[32, 64, 128]):
+        super().__init__()
 
+        # Initial convolution (smaller kernel, less aggressive stride)
+        self.initial_conv = nn.Conv2d(input_channels, channels[0],
+                                      kernel_size=(3, 3), stride=(1, 1), padding=1)
+        self.initial_bn = nn.BatchNorm2d(channels[0])
 
+        # ResNet blocks
+        self.block1 = ResNetBlock2D(channels[0], channels[0])
+        self.block2 = ResNetBlock2D(channels[0], channels[1])
+        self.block3 = ResNetBlockFinal2D(channels[1], channels[2])
+
+        # Classification head
+        self.classifier = nn.Linear(channels[2], num_classes)
+        self.relu = nn.ReLU()
 
     def forward(self, x):
         x = self.relu(self.initial_bn(self.initial_conv(x)))

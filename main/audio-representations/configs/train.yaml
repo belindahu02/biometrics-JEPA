@@ -57,3 +57,62 @@ logger:
   init_args:
     save_dir: logs
     name: default
+
+# ============================================================================
+# NEW: Downstream Evaluation Configuration
+# Enable/disable downstream evaluation during training
+# ============================================================================
+downstream_evaluation:
+  # Set to true to enable downstream evaluation every N epochs
+  enabled: true  # Set to true when you want to use this feature
+
+  # Evaluation settings
+  eval_every_n_epochs: 5  # Evaluate downstream task every N epochs
+
+  # Paths (relative to your project root)
+  classification_scripts_dir: "./classification"  # Path to precompute.py, group.py, etc.
+
+  # Evaluation parameters for consistency during training
+  samples_per_user: 50  # Fixed sample size for evaluation
+  n_runs: 3  # Number of runs per evaluation (fewer for speed during training)
+  epochs_per_run: 30  # Epochs per classification run (fewer for speed)
+  normalization_method: "none"  # Normalization method for spectrograms
+  model_type: "lightweight"  # Use lightweight model for faster evaluation
+  user_ids: [1, 2, 3]  # Which users to evaluate on
+
+  # Best model tracking
+  save_top_k: 3  # Keep top K models based on downstream accuracy
+  early_stopping_patience: 20  # Stop if no improvement for N evaluations (100 epochs)
+
+  # Advanced settings
+  verbose: true  # Print detailed evaluation progress
+  cleanup_temp_checkpoints: true  # Clean up temporary checkpoints after evaluation
+  save_evaluation_plots: false  # Save plots for each evaluation (slower)
+
+# ============================================================================
+# NEW: Additional callback for downstream-based model checkpointing
+# This will override the default model checkpoint when downstream eval is enabled
+# ============================================================================
+downstream_model_checkpoint:
+  _target_: lightning.pytorch.callbacks.ModelCheckpoint
+  dirpath: ${paths.output_dir}/checkpoints
+  filename: "best-downstream-{downstream_accuracy:.4f}-epoch-{epoch}"
+  monitor: "downstream_accuracy"
+  mode: "max"
+  save_top_k: 3
+  save_last: true
+  auto_insert_metric_name: false
+  verbose: true
+  every_n_epochs: ${downstream_evaluation.eval_every_n_epochs}
+
+# ============================================================================
+# NEW: Early stopping based on downstream performance
+# ============================================================================
+downstream_early_stopping:
+  _target_: lightning.pytorch.callbacks.EarlyStopping
+  monitor: "downstream_accuracy"
+  patience: ${downstream_evaluation.early_stopping_patience}
+  mode: "max"
+  min_delta: 0.001
+  verbose: true
+  strict: false  # Don't fail if metric not available initially
