@@ -206,6 +206,135 @@ def get_file_paths_and_labels(data_path, user_ids):
 
     return file_paths, labels, sessions_info
 
+def create_memory_efficient_dataloaders_masked(train_data_path, test_data_path, user_ids, samples_per_user,
+                                        normalization='none', batch_size=16,
+                                        augment_train=False, cache_size=100):
+    """
+    Create memory-efficient data loaders:
+    - Train/Val are split from train_data_path (same as FIXED logic).
+    - Test set uses masked versions of those same files from test_data_path.
+    """
+
+    print("Creating memory-efficient data loaders (masked test)...")
+
+    # Load all file paths and labels
+    file_paths, labels, sessions = get_file_paths_and_labels(train_data_path, user_ids)
+    if len(file_paths) == 0:
+        raise ValueError("No valid spectrogram files found")
+
+    print(f"Total files found: {len(file_paths)}")
+
+    # Convert to numpy arrays
+    file_paths = np.array(file_paths)
+    labels = np.array(labels)
+
+    # Limit samples per user
+    if samples_per_user is not None:
+        limited_paths, limited_labels = [], []
+        for user_idx in np.unique(labels):
+            user_mask = labels == user_idx
+            user_paths = file_paths[user_mask]
+            user_labels = labels[user_mask]
+
+            if len(user_paths) > samples_per_user:
+                indices = np.random.choice(len(user_paths), samples_per_user, replace=False)
+                user_paths = user_paths[indices]
+                user_labels = user_labels[indices]
+
+            limited_paths.extend(user_paths)
+            limited_labels.extend(user_labels)
+
+        file_paths = np.array(limited_paths)
+        labels = np.array(limited_labels)
+
+    print(f"Using {len(file_paths)} files after limiting samples per user")
+
+    # Train/val/test split (same as FIXED)
+    train_paths, train_labels = [], []
+    val_paths, val_labels = [], []
+    test_filenames, test_labels = [], []
+
+    for user_idx in np.unique(labels):
+        user_mask = labels == user_idx
+        user_paths = file_paths[user_mask]
+        user_labels = labels[user_mask]
+
+        n_samples = len(user_paths)
+
+        if n_samples < 3:
+            train_paths.extend(user_paths)
+            train_labels.extend(user_labels)
+            continue
+
+        n_train = max(int(n_samples * 0.7), 1)
+        n_val = max(int(n_samples * 0.15), 1)
+        n_test = n_samples - n_train - n_val
+
+        if n_test < 1 and n_samples >= 3:
+            n_test = 1
+            n_val = max(1, n_samples - n_train - n_test)
+
+        indices = np.random.permutation(n_samples)
+        train_idx = indices[:n_train]
+        val_idx = indices[n_train:n_train + n_val]
+        test_idx = indices[n_train + n_val:n_train + n_val + n_test]
+
+        train_paths.extend(user_paths[train_idx])
+        train_labels.extend(user_labels[train_idx])
+
+        if len(val_idx) > 0:
+            val_paths.extend(user_paths[val_idx])
+            val_labels.extend(user_labels[val_idx])
+
+        if len(test_idx) > 0:
+            test_filenames.extend([os.path.basename(user_paths[i]) for i in test_idx])
+            test_labels.extend(user_labels[test_idx])
+
+    # Map masked test files
+    test_file_paths_all, _, _ = get_file_paths_and_labels(test_data_path, user_ids)
+    test_fnames_map = {os.path.basename(f): f for f in test_file_paths_all}
+
+    test_paths, final_test_labels = [], []
+    for fname, label in zip(test_filenames, test_labels):
+        if fname in test_fnames_map:
+            test_paths.append(test_fnames_map[fname])
+            final_test_labels.append(label)
+        else:
+            print(f"⚠️ Warning: Test file {fname} not found in {test_data_path}")
+
+    print(f"Final split: Train={len(train_paths)}, Val={len(val_paths)}, Test={len(test_paths)}")
+
+    # ✅ Sanity check
+    train_val_basenames = set([os.path.basename(f) for f in train_paths + val_paths])
+    test_basenames = set([os.path.basename(f) for f in test_paths])
+
+    matched = test_basenames & train_val_basenames
+    unmatched = test_basenames - train_val_basenames
+
+    print(f"Sanity check: {len(matched)} / {len(test_basenames)} test files matched train/val basenames")
+    if unmatched:
+        print(f"⚠️ Warning: {len(unmatched)} unmatched test files (e.g., {list(unmatched)[:5]})")
+
+    # Build datasets
+    train_dataset = SpectrogramDataset(train_paths, train_labels, 'none',
+                                       add_channel_dim=True, augment=augment_train,
+                                       cache_size=cache_size)
+    val_dataset = SpectrogramDataset(val_paths, val_labels, 'none',
+                                     add_channel_dim=True, augment=False,
+                                     cache_size=cache_size // 2)
+    test_dataset = SpectrogramDataset(test_paths, final_test_labels, 'none',
+                                      add_channel_dim=True, augment=False,
+                                      cache_size=cache_size // 2)
+
+    # DataLoaders
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
+                              num_workers=0, pin_memory=False, persistent_workers=False)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
+                            num_workers=0, pin_memory=False, persistent_workers=False)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False,
+                             num_workers=0, pin_memory=False, persistent_workers=False)
+
+    return train_loader, val_loader, test_loader, sessions
 
 def create_memory_efficient_dataloaders(data_path, user_ids, samples_per_user,
                                         normalization='none', batch_size=16,

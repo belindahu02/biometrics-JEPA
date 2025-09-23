@@ -101,6 +101,6 @@ def trainer(samples_per_user, fet_extrct, scen, ft):
   # kappa_score = result.numpy()
   y_pred_probs = resnettssd.predict(x_test)
   kappa_score = compute_cohen_kappa(y_test, y_pred_probs, num_classes)
-  print('kappa score: ',result.numpy())
+  print('kappa score: ', kappa_score)
   
   return test_acc, kappa_score
