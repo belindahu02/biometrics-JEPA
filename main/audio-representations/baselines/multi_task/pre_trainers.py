@@ -14,7 +14,7 @@ def pre_trainer(scen):
   path = "/app/1.0.0/"
   # path = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/mmi/dataset/physionet.org/files/eegmmidb/1.0.0"
 
-  users_2 = list(range(1, 110))  # Users for dataset 2
+  users_2 = list(range(1, 11))  # Users for dataset 2
   folder_train = ["TrainingSet"]
   
   x_train, y_train, sessions_train = data_load_origin(path, users=users_2, folders=folder_train, frame_size=30)
