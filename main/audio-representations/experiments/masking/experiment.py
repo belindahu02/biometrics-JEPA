@@ -4,18 +4,15 @@ Integrates all components: masking, preprocessing, training, and evaluation
 WITH CHECKPOINT SUPPORT FOR RESUMING FROM INTERRUPTIONS
 """
 
-import os
 import sys
 import numpy as np
 import torch
-import torch.nn as nn
 from pathlib import Path
 import json
 import time
 from datetime import datetime
 import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import cohen_kappa_score
 
 # Import your modules
 from utils import EEGMaskingProcessor, create_masked_dataset_for_experiment, run_embedding_extraction, run_embedding_grouping
@@ -94,8 +91,9 @@ class EEGMaskingExperiment:
             data_dir=unmasked_dir,
             embeddings_dir=embeddings_dir,
             model_checkpoint_path=self.config['model_checkpoint_path'],
-            config_path=self.config.get('model_config_path', None),
+            config_path=self.config['model_config_path'],  # Now required, not optional
             batch_size=self.config['batch_size'],
+            num_workers=2,  # Reduced for stability
             device=self.device if hasattr(self, 'device') else None
         )
 
@@ -189,8 +187,9 @@ class EEGMaskingExperiment:
                     data_dir=variant_dir,
                     embeddings_dir=embeddings_dir,
                     model_checkpoint_path=self.config['model_checkpoint_path'],
-                    config_path=self.config.get('model_config_path', None),
+                    config_path=self.config['model_config_path'],  # Now required, not optional
                     batch_size=self.config['batch_size'],
+                    num_workers=2,  # Reduced for stability
                     device=self.device if hasattr(self, 'device') else None
                 )
 
@@ -352,6 +351,78 @@ class EEGMaskingExperiment:
                         detailed_results=detailed_results,
                         metadata={'step': 3, 'progress': f"{current_eval}/{total_evaluations}"}
                     )
+
+        return accuracy_matrix, kappa_matrix, detailed_results
+
+        # Results matrices
+        accuracy_matrix = np.zeros((len(self.masking_percentages), len(self.num_blocks_range)))
+        kappa_matrix = np.zeros((len(self.masking_percentages), len(self.num_blocks_range)))
+
+        detailed_results = []
+
+        total_evaluations = len(self.masking_percentages) * len(self.num_blocks_range)
+        current_eval = 0
+
+        for i, mask_pct in enumerate(self.masking_percentages):
+            for j, num_blocks in enumerate(self.num_blocks_range):
+                current_eval += 1
+
+                print(f"Evaluation {current_eval}/{total_evaluations}: {mask_pct}% masking, {num_blocks} blocks")
+
+                try:
+                    # Get test data directory
+                    grouped_dir = test_data_dirs[(mask_pct, num_blocks)]
+
+                    # Create test data loader (only test sessions)
+                    test_dataset = TestOnlyDataset(grouped_dir, self.config['user_ids'])
+                    test_loader = torch.utils.data.DataLoader(
+                        test_dataset,
+                        batch_size=self.config['batch_size'],
+                        shuffle=False
+                    )
+
+                    if len(test_loader) == 0:
+                        print(f"  No test data found for this variant")
+                        accuracy_matrix[i, j] = np.nan
+                        kappa_matrix[i, j] = np.nan
+                        continue
+
+                    # Run multiple evaluations and average
+                    accuracies = []
+                    kappa_scores = []
+
+                    for run in range(self.config['eval_runs_per_variant']):
+                        acc, kappa = trainer.evaluate_with_kappa(test_loader)
+                        accuracies.append(acc)
+                        kappa_scores.append(kappa)
+
+                    avg_acc = np.mean(accuracies)
+                    avg_kappa = np.mean(kappa_scores)
+                    std_acc = np.std(accuracies)
+                    std_kappa = np.std(kappa_scores)
+
+                    accuracy_matrix[i, j] = avg_acc
+                    kappa_matrix[i, j] = avg_kappa
+
+                    result_record = {
+                        'masking_percentage': mask_pct,
+                        'num_blocks': num_blocks,
+                        'avg_accuracy': avg_acc,
+                        'std_accuracy': std_acc,
+                        'avg_kappa': avg_kappa,
+                        'std_kappa': std_kappa,
+                        'accuracies': accuracies,
+                        'kappa_scores': kappa_scores,
+                        'num_runs': len(accuracies)
+                    }
+                    detailed_results.append(result_record)
+
+                    print(f"  Results: Acc={avg_acc:.4f}±{std_acc:.4f}, Kappa={avg_kappa:.4f}±{std_kappa:.4f}")
+
+                except Exception as e:
+                    print(f"  Error: {e}")
+                    accuracy_matrix[i, j] = np.nan
+                    kappa_matrix[i, j] = np.nan
 
         return accuracy_matrix, kappa_matrix, detailed_results
 
@@ -790,27 +861,28 @@ def main():
     # Experiment configuration
     config = {
         # Paths (adjust for your environment)
-        'experiment_dir': '/app/experiments/eeg_masking_experiment',
-        'raw_eeg_dir': '/app/data/physionet.org/files/eegmmidb/1.0.0',
+        'experiment_dir': '/app/data/experiments/masking',
+        'raw_eeg_dir': '/app/data/1.0.0',
 
-        # Pre-trained model paths - CRITICAL: Set these to your actual model paths
-        'model_checkpoint_path': '/app/data/jepa_logs_subset10/xps/97d170e1/checkpoints/last.ckpt',
-        'model_config_path': None,  # Optional: path to your Hydra config file
+        # Pre-trained model paths - CRITICAL: Set these to your actual paths
+        'model_checkpoint_path': '/app/data/jepa_logs_full/last.ckpt',
+        'model_config_path': '/app/data/jepa_logs_full/configs',  # Directory containing train.yaml (REQUIRED)
 
         # Local paths (comment out if using server)
-        'experiment_dir': '/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/experiments/eeg_masking_experiment',
-        'raw_eeg_dir': '/Users/belindahu/Desktop/thesis/biometrics-JEPA/mmi/dataset/physionet.org/files/eegmmidb/1.0.0',
+        # 'experiment_dir': '/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/experiments/eeg_masking_experiment',
+        # 'raw_eeg_dir': '/Users/belindahu/Desktop/thesis/biometrics-JEPA/mmi/dataset/physionet.org/files/eegmmidb/1.0.0',
         # 'model_checkpoint_path': '/Users/belindahu/Desktop/thesis/biometrics-JEPA/path/to/your/model/checkpoint.ckpt',
+        # 'model_config_path': '/Users/belindahu/Desktop/thesis/biometrics-JEPA/configs',  # Directory with train.yaml
 
         # Experiment parameters
-        'user_ids': list(range(1, 11)),  # S001-S010
+        'user_ids': list(range(1, 110)),  # S001-S010
         'train_sessions': list(range(1, 11)),  # Sessions 1-10 for training
         'val_sessions': [11, 12],              # Sessions 11-12 for validation
         'test_sessions': [13, 14],             # Sessions 13-14 for testing
 
         # Training parameters
         'train_epochs': 100,
-        'batch_size': 16,
+        'batch_size': 2,
         'learning_rate': 0.001,
         'eval_runs_per_variant': 3,  # Number of evaluation runs per masking variant
 

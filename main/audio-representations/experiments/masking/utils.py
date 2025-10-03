@@ -14,7 +14,6 @@ import os
 
 warnings.simplefilter('ignore')
 
-
 class EEGMaskingProcessor:
     """Process EEG files with masking applied before spectrogram conversion"""
 
@@ -26,8 +25,8 @@ class EEGMaskingProcessor:
         # Spectrogram parameters (from your EEG_FFT_parameters)
         self.window_size = 400  # 25ms window at 16kHz
         self.n_fft = 400
-        self.hop_size = 160  # 10ms stride at 16kHz
-        self.n_mels = 80  # Number of mel frequency bins
+        self.hop_size = 160     # 10ms stride at 16kHz
+        self.n_mels = 80        # Number of mel frequency bins
         self.f_min = 0.5
         self.f_max = 100
 
@@ -192,8 +191,7 @@ class EEGMaskingProcessor:
                 frames = self.split_into_frames(eeg_signal)
 
                 # Process each frame
-                channel_name = channel_names[channel_idx] if channel_idx < len(
-                    channel_names) else f"channel_{channel_idx:02d}"
+                channel_name = channel_names[channel_idx] if channel_idx < len(channel_names) else f"channel_{channel_idx:02d}"
                 channel_name = "".join(c for c in channel_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
                 channel_name = channel_name.replace(' ', '_')
 
@@ -230,7 +228,7 @@ class EEGMaskingProcessor:
             raise
 
     def process_session_data(self, raw_eeg_dir, user_id, session_nums, masking_percentage=0,
-                             num_blocks=1, output_base_dir=None):
+                           num_blocks=1, output_base_dir=None):
         """
         Process multiple sessions for a user with masking
 
@@ -285,7 +283,7 @@ class EEGMaskingProcessor:
 
 
 def create_masked_dataset_for_experiment(raw_eeg_dir, output_dir, user_ids, session_nums,
-                                         masking_percentage, num_blocks):
+                                        masking_percentage, num_blocks):
     """
     Create a complete masked dataset for the experiment
 
@@ -370,18 +368,32 @@ def create_file_listing_csv(data_dir, csv_path):
 
 
 def run_embedding_extraction(csv_path, data_dir, embeddings_dir, model_checkpoint_path,
-                             config_path=None, batch_size=16, device=None):
+                           config_path, batch_size=16, num_workers=4, device=None):
     """
     Extract embeddings using a pre-trained JEPA encoder model
-    Uses your actual precompute.py functionality with pre-trained weights
+    Uses your actual precompute.py functionality with Hydra config
+
+    Args:
+        csv_path: Path to CSV listing all files
+        data_dir: Directory containing spectrogram .npy files
+        embeddings_dir: Where to save embeddings
+        model_checkpoint_path: Path to model checkpoint (.ckpt file)
+        config_path: Path to Hydra config directory (must contain train.yaml)
+        batch_size: Batch size for processing
+        num_workers: Number of workers for data loading
+        device: Device to use (cuda/cpu), auto-detect if None
     """
     from embedding_extractor import extract_embeddings_for_masking_experiment
 
     print(f"Extracting REAL embeddings from {data_dir} to {embeddings_dir}")
     print(f"Using checkpoint: {model_checkpoint_path}")
+    print(f"Using config: {config_path}")
 
     if not model_checkpoint_path or not Path(model_checkpoint_path).exists():
         raise FileNotFoundError(f"Model checkpoint not found: {model_checkpoint_path}")
+
+    if not config_path or not Path(config_path).exists():
+        raise FileNotFoundError(f"Config path not found: {config_path}. Must point to directory containing train.yaml")
 
     return extract_embeddings_for_masking_experiment(
         csv_file=csv_path,
@@ -390,6 +402,7 @@ def run_embedding_extraction(csv_path, data_dir, embeddings_dir, model_checkpoin
         checkpoint_path=model_checkpoint_path,
         config_path=config_path,
         batch_size=batch_size,
+        num_workers=num_workers,
         device=device
     )
 
@@ -454,10 +467,10 @@ def test_masking_processor():
 
     # Test different masking configurations
     test_configs = [
-        (0, 1),  # No masking
-        (10, 1),  # 10% masking, 1 block
-        (10, 2),  # 10% masking, 2 blocks
-        (25, 5),  # 25% masking, 5 blocks
+        (0, 1),    # No masking
+        (10, 1),   # 10% masking, 1 block
+        (10, 2),   # 10% masking, 2 blocks
+        (25, 5),   # 25% masking, 5 blocks
     ]
 
     for mask_pct, num_blocks in test_configs:

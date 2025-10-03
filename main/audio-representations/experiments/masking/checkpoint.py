@@ -5,7 +5,6 @@ Allows resuming from interruptions at any stage
 
 import json
 import pickle
-import numpy as np
 from pathlib import Path
 from datetime import datetime
 import shutil
