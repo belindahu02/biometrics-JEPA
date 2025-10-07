@@ -60,7 +60,7 @@ class MaskingExperimentCheckpoint:
 
         # Save JSON checkpoint
         with open(self.checkpoint_file, 'w') as f:
-            json.dump(checkpoint_data, f, indent=2)
+            json.dump(checkpoint_data, f, indent=2, default=str)
 
         # Save full state (including numpy arrays) as pickle
         state_data = {

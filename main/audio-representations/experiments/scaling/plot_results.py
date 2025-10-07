@@ -2,7 +2,7 @@
 # plot_results.py with User-based Scaling
 # =============================================
 
-from trainers import spectrogram_trainer_2d  # Updated import for 2D trainer
+from trainers_cosine import spectrogram_trainer_2d  # Updated import for 2D trainer
 import numpy as np
 import matplotlib.pyplot as plt
 import os
@@ -301,13 +301,18 @@ try:
                     normalization_method=NORMALIZATION_METHOD,
                     model_type=MODEL_TYPE,
                     epochs=100,
-                    batch_size=8 if MODEL_TYPE == 'full' else 16,
-                    lr=0.001,
+                    batch_size=16,
+                    lr=0.0003,  # Consider reducing to 0.0003 or 0.0005
                     use_augmentation=True,
                     device='cuda',
                     save_model_checkpoints=True,
                     checkpoint_every=RUNS_PER_USER_COUNT,
-                    max_cache_size=50
+                    max_cache_size=50,
+                    # New parameters for collapse prevention
+                    use_cosine_classifier=True,  # Enable cosine classifier
+                    cosine_scale=30.0,  # Temperature scaling (try 50.0 or 64.0 if still collapsing)
+                    label_smoothing=0.1,  # Label smoothing factor
+                    warmup_epochs=5  # Warmup period
                 )
 
                 acc_temp.append(test_acc)

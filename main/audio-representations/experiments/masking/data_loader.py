@@ -7,6 +7,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from pathlib import Path
+import torch.nn as nn
 
 
 class SessionBasedMaskingDataset(Dataset):

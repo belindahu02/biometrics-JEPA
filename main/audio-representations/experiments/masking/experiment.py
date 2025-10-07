@@ -71,14 +71,17 @@ class EEGMaskingExperiment:
 
         unmasked_dir = self.data_dir / "unmasked_train_val"
 
-        create_masked_dataset_for_experiment(
-            raw_eeg_dir=self.config['raw_eeg_dir'],
-            output_dir=unmasked_dir,
-            user_ids=self.config['user_ids'],
-            session_nums=train_val_sessions,
-            masking_percentage=0,  # No masking
-            num_blocks=1
-        )
+        if unmasked_dir.exists() and any(unmasked_dir.iterdir()):
+            print(f"Dataset already exists at {unmasked_dir}, skipping creation.")
+        else:
+            create_masked_dataset_for_experiment(
+                raw_eeg_dir=self.config['raw_eeg_dir'],
+                output_dir=unmasked_dir,
+                user_ids=self.config['user_ids'],
+                session_nums=train_val_sessions,
+                masking_percentage=0,  # No masking
+                num_blocks=1
+            )
 
         # Run preprocessing pipeline
         print("Running preprocessing pipeline...")
@@ -566,30 +569,55 @@ class EEGMaskingExperiment:
             'summary_statistics': self._calculate_summary_stats(accuracy_matrix, kappa_matrix)
         }
 
+        def convert_numpy(obj):
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, (np.integer, np.int64)):
+                return int(obj)
+            elif isinstance(obj, (np.floating, np.float64)):
+                return float(obj)
+            elif isinstance(obj, dict):
+                return {k: convert_numpy(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_numpy(x) for x in obj]
+            return obj
+
+        # -----------------------------
         # Save as JSON
+        # -----------------------------
         json_path = self.results_dir / "experiment_results.json"
         with open(json_path, 'w') as f:
-            json.dump(results_data, f, indent=2)
+            json.dump(convert_numpy(results_data), f, indent=2)
 
-        # Save as pickle for easy loading
+        # -----------------------------
+        # Save as pickle
+        # -----------------------------
         import pickle
         pickle_path = self.results_dir / "experiment_results.pkl"
         with open(pickle_path, 'wb') as f:
             pickle.dump(results_data, f)
 
-        # Save matrices as numpy arrays
+        # -----------------------------
+        # Save matrices as NumPy arrays
+        # -----------------------------
+        npz_path = self.results_dir / "results_matrices.npz"
         np.savez(
-            self.results_dir / "results_matrices.npz",
+            npz_path,
             accuracy_matrix=accuracy_matrix,
             kappa_matrix=kappa_matrix,
-            masking_percentages=self.masking_percentages,
+            detailed_results=np.array(detailed_results, dtype=object),  # if it's a list of dicts
+            base_val_acc=float(base_val_acc),
+            masking_percentages=np.array(self.masking_percentages),
             num_blocks_range=np.array(self.num_blocks_range)
         )
 
+        # -----------------------------
+        # Print saved paths
+        # -----------------------------
         print(f"Results saved to:")
         print(f"  JSON: {json_path}")
         print(f"  Pickle: {pickle_path}")
-        print(f"  NumPy: {self.results_dir}/results_matrices.npz")
+        print(f"  NumPy: {npz_path}")
 
         return results_data
 
@@ -720,7 +748,7 @@ class EEGMaskingExperiment:
                 if checkpoint_state and 'accuracy_matrix' in checkpoint_state:
                     accuracy_matrix = checkpoint_state['accuracy_matrix']
                     kappa_matrix = checkpoint_state['kappa_matrix']
-                    detailed_results = checkpoint_state.get('detailed_results', [])
+                    detailed_results = checkpoint_state.get('detailed_results') or []  # <-- ensures it's not None
                     print(f"  Resuming evaluation with {len(detailed_results)} completed variants")
                 else:
                     accuracy_matrix = None

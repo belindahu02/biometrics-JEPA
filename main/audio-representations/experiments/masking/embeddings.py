@@ -106,10 +106,18 @@ class EmbeddingExtractor:
 
         try:
             # Import register_resolvers if available
+            from omegaconf import OmegaConf
+
             try:
                 from src.utils import register_resolvers
-                register_resolvers()
-                log("Custom resolvers registered")
+
+                # Only register if not already done
+                if not OmegaConf.has_resolver("effective_lr"):  # replace with one of yours
+                    register_resolvers()
+                    log("Custom resolvers registered")
+                else:
+                    log("Resolvers already registered, skipping re-registration")
+
             except ImportError:
                 log("Warning: Could not import register_resolvers, continuing without it")
 

@@ -383,7 +383,7 @@ def run_embedding_extraction(csv_path, data_dir, embeddings_dir, model_checkpoin
         num_workers: Number of workers for data loading
         device: Device to use (cuda/cpu), auto-detect if None
     """
-    from embedding_extractor import extract_embeddings_for_masking_experiment
+    from embeddings import extract_embeddings_for_masking_experiment
 
     print(f"Extracting REAL embeddings from {data_dir} to {embeddings_dir}")
     print(f"Using checkpoint: {model_checkpoint_path}")
@@ -402,7 +402,6 @@ def run_embedding_extraction(csv_path, data_dir, embeddings_dir, model_checkpoin
         checkpoint_path=model_checkpoint_path,
         config_path=config_path,
         batch_size=batch_size,
-        num_workers=num_workers,
         device=device
     )
 
