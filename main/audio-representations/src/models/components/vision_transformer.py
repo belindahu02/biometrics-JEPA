@@ -23,7 +23,7 @@ import numpy as np
 # import timm
 from timm.models.vision_transformer import Block, DropPath, Mlp
 
-from src.utils.masks import unstructured_mask
+from src.utils.masks import unstructured_mask, time_mask
 from src.utils.pos_embed import get_2d_sincos_pos_embed
 
 
@@ -146,7 +146,7 @@ class ViTEncoder(nn.Module):
             self.grid_size[1] = 1  # put 1 in time dimension since embeddings are relative in this dimension anyway
 
         # masking method
-        self.masking_fn = unstructured_mask
+        self.masking_fn = time_mask
 
         self.patch_embed = PatchEmbed(self.patch_size, in_chans, embed_dim)
 
