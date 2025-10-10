@@ -61,8 +61,7 @@ def trainer(num_users, fet_extrct, scen, ft):
         fet_extrct.layers[i].trainable = False
 
     frame_size = 30
-    # path = "/app/data/1.0.0"
-    path = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data"  # Update this path
+    path = "/app/data/1.0.0"
 
     # Select users based on num_users parameter
     users = list(range(1, num_users + 1))

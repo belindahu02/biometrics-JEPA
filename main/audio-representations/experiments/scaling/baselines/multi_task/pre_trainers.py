@@ -8,11 +8,11 @@ from data_loader import *
 
 def pre_trainer(scen):
     frame_size = 30
-    # path = "/app/data/1.0.0"
-    path = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/mmi/dataset/physionet.org/files/eegmmidb/1.0.0"  # Update this path
+    path = "/app/data/1.0.0"
+    # path = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/mmi/dataset/physionet.org/files/eegmmidb/1.0.0"  # Update this path
 
     # Use first 50 users for pre-training (adjust as needed)
-    users = list(range(1, 2))
+    users = list(range(1, 110))
     train_sessions = list(range(1, 15))  # R01-R10 for pre-training
 
     print("Loading pre-training data...")

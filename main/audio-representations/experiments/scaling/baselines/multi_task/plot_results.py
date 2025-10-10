@@ -4,8 +4,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Base output directory on host
-base_dir = "test/"
-# base_dir = "/app/data/experiments/scaling/baselines"
+# base_dir = "test/"
+base_dir = "/app/data/experiments/scaling/baselines"
 
 # Make sure these exist
 graph_data_dir = os.path.join(base_dir, "multi_task/graph_data")
