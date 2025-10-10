@@ -1,959 +1,935 @@
-# =============================================
-# Enhanced trainers_2d.py with Cosine Classifier, Label Smoothing, and Warmup
-# =============================================
+"""
+Efficient Ablation Study for Optimal Hyperparameter Configuration
 
-import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
-from backbones import SpectrogramResNet, LightweightSpectrogramResNet
-# Import the session-based functions
-from data_loader import create_session_based_dataloaders
+Since cosine classifier, label smoothing, and warmup all help prevent collapse,
+we always include them and focus on finding the optimal configuration.
+
+Strategy: Use a smart fractional factorial design instead of full grid search
+to reduce experiments from ~162 (3*2*2*3*3*3) to ~30 meaningful experiments.
+
+Includes experiments for:
+- Learning rate: [0.0003, 0.001, 0.003]
+- Batch size: [8, 16]
+- Model type: [lightweight, full]
+- Cosine scale: [20, 40, 64]
+- Label smoothing: [0.0, 0.1, 0.2]
+- Warmup epochs: [0, 5, 10]
+"""
+
 import os
 import json
-from datetime import datetime
-import time
-import logging
+import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
-import gc
+import seaborn as sns
+from datetime import datetime
+from trainers import spectrogram_trainer_2d
+from itertools import product
 
-torch.backends.cudnn.benchmark = True
-torch.backends.cudnn.enabled = True
+# Set publication-quality plot defaults
+plt.rcParams['figure.dpi'] = 300
+plt.rcParams['savefig.dpi'] = 300
+plt.rcParams['font.size'] = 10
+plt.rcParams['font.family'] = 'serif'
+plt.rcParams['axes.labelsize'] = 12
+plt.rcParams['axes.titlesize'] = 14
+plt.rcParams['xtick.labelsize'] = 10
+plt.rcParams['ytick.labelsize'] = 10
+plt.rcParams['legend.fontsize'] = 10
+
+# =============================================
+# CONFIGURATION
+# =============================================
+
+DATA_PATH = "path/to/your/data"  # UPDATE THIS
+MODEL_PATH = "path/to/models/efficient_ablation"  # UPDATE THIS
+NORMALIZATION_METHOD = "log_scale"
+
+# Test with challenging number of users
+USER_IDS = list(range(1, 31))  # 30 users
+
+# Common parameters for all experiments
+COMMON_PARAMS = {
+    'data_path': DATA_PATH,
+    'model_path': MODEL_PATH,
+    'user_ids': USER_IDS,
+    'normalization_method': NORMALIZATION_METHOD,
+    'epochs': 50,  # Adjust based on compute budget
+    'use_augmentation': True,
+    'device': 'cuda',
+    'save_model_checkpoints': True,
+    'checkpoint_every': 10,
+    'max_cache_size': 50,
+    # Always use these to prevent collapse
+    'use_cosine_classifier': True,
+}
 
 
 # =============================================
-# NEW: Cosine Classifier Head
+# EFFICIENT EXPERIMENT DESIGN
 # =============================================
-class CosineClassifier(nn.Module):
+
+def create_efficient_experiment_set():
     """
-    Cosine similarity-based classifier head.
-    Normalizes both embeddings and weights, then computes scaled cosine similarity.
+    Create an efficient set of experiments using a smart sampling strategy.
+
+    Strategy:
+    1. Baseline with recommended defaults (1 exp)
+    2. One-at-a-time (OAT) variations from baseline (12 exp)
+    3. Model type comparison with optimal settings (2 exp)
+    4. Batch size comparison with optimal settings (2 exp)
+    5. Interaction tests for critical pairs (6 exp)
+
+    Total: ~23 experiments instead of 162
     """
 
-    def __init__(self, in_features, num_classes, scale=30.0):
-        super().__init__()
-        self.in_features = in_features
-        self.num_classes = num_classes
-        self.scale = scale
+    experiments = []
 
-        # Learnable weight matrix (will be L2-normalized)
-        self.weight = nn.Parameter(torch.randn(num_classes, in_features))
-        nn.init.xavier_uniform_(self.weight)
+    # ========== GROUP 1: BASELINE ==========
+    # Start with recommended defaults
+    baseline = {
+        'name': 'baseline_recommended',
+        'description': 'Baseline with recommended defaults',
+        'params': {
+            'lr': 0.001,
+            'batch_size': 16,
+            'model_type': 'lightweight',
+            'cosine_scale': 40.0,
+            'label_smoothing': 0.1,
+            'warmup_epochs': 5,
+        }
+    }
+    experiments.append(baseline)
 
-    def forward(self, x):
-        # L2 normalize input embeddings
-        x_norm = F.normalize(x, p=2, dim=1)
+    # ========== GROUP 2: ONE-AT-A-TIME (OAT) VARIATIONS ==========
+    # Test each parameter while keeping others at baseline
 
-        # L2 normalize weight vectors
-        w_norm = F.normalize(self.weight, p=2, dim=1)
+    # Learning rate variations
+    for lr in [0.0003, 0.003]:  # Skip 0.001 as it's baseline
+        experiments.append({
+            'name': f'oat_lr_{lr:.4f}'.replace('.', '_'),
+            'description': f'OAT: Learning Rate = {lr}',
+            'params': {**baseline['params'], 'lr': lr}
+        })
 
-        # Cosine similarity (dot product of normalized vectors)
-        logits = F.linear(x_norm, w_norm)
+    # Cosine scale variations
+    for scale in [20.0, 64.0]:  # Skip 40.0 as it's baseline
+        experiments.append({
+            'name': f'oat_scale_{int(scale)}',
+            'description': f'OAT: Cosine Scale = {scale}',
+            'params': {**baseline['params'], 'cosine_scale': scale}
+        })
 
-        # Scale logits
-        return logits * self.scale
+    # Label smoothing variations
+    for smoothing in [0.0, 0.2]:  # Skip 0.1 as it's baseline
+        experiments.append({
+            'name': f'oat_smoothing_{smoothing:.1f}'.replace('.', '_'),
+            'description': f'OAT: Label Smoothing = {smoothing}',
+            'params': {**baseline['params'], 'label_smoothing': smoothing}
+        })
+
+    # Warmup variations
+    for warmup in [0, 10]:  # Skip 5 as it's baseline
+        experiments.append({
+            'name': f'oat_warmup_{warmup}',
+            'description': f'OAT: Warmup Epochs = {warmup}',
+            'params': {**baseline['params'], 'warmup_epochs': warmup}
+        })
+
+    # Batch size variations
+    for batch_size in [8]:  # Skip 16 as it's baseline
+        experiments.append({
+            'name': f'oat_batch_{batch_size}',
+            'description': f'OAT: Batch Size = {batch_size}',
+            'params': {**baseline['params'], 'batch_size': batch_size}
+        })
+
+    # Model type variations
+    for model_type in ['full']:  # Skip lightweight as it's baseline
+        experiments.append({
+            'name': f'oat_model_{model_type}',
+            'description': f'OAT: Model Type = {model_type}',
+            'params': {**baseline['params'], 'model_type': model_type}
+        })
+
+    # ========== GROUP 3: CRITICAL INTERACTIONS ==========
+    # Test combinations that are likely to interact
+
+    # Interaction 1: Batch size + Learning rate (smaller batch needs smaller LR)
+    experiments.append({
+        'name': 'interact_batch8_lr0003',
+        'description': 'Batch 8 + LR 0.0003',
+        'params': {**baseline['params'], 'batch_size': 8, 'lr': 0.0003}
+    })
+
+    # Interaction 2: Full model + higher LR (more capacity needs different LR)
+    experiments.append({
+        'name': 'interact_full_lr0003',
+        'description': 'Full model + LR 0.0003',
+        'params': {**baseline['params'], 'model_type': 'full', 'lr': 0.0003}
+    })
+
+    experiments.append({
+        'name': 'interact_full_lr003',
+        'description': 'Full model + LR 0.003',
+        'params': {**baseline['params'], 'model_type': 'full', 'lr': 0.003}
+    })
+
+    # Interaction 3: Higher cosine scale + higher smoothing (both increase regularization)
+    experiments.append({
+        'name': 'interact_scale64_smooth02',
+        'description': 'High scale + High smoothing',
+        'params': {**baseline['params'], 'cosine_scale': 64.0, 'label_smoothing': 0.2}
+    })
+
+    # Interaction 4: No warmup + lower LR (safe combination)
+    experiments.append({
+        'name': 'interact_nowarmup_lr0003',
+        'description': 'No warmup + Low LR',
+        'params': {**baseline['params'], 'warmup_epochs': 0, 'lr': 0.0003}
+    })
+
+    # Interaction 5: Full model + Batch 8 (memory/performance tradeoff)
+    experiments.append({
+        'name': 'interact_full_batch8',
+        'description': 'Full model + Batch 8',
+        'params': {**baseline['params'], 'model_type': 'full', 'batch_size': 8}
+    })
+
+    # ========== GROUP 4: EXTREME CONFIGURATIONS ==========
+    # Test corner cases
+
+    # Conservative: Everything regularized
+    experiments.append({
+        'name': 'extreme_conservative',
+        'description': 'Conservative: Low LR, High smoothing, Long warmup',
+        'params': {
+            'lr': 0.0003,
+            'batch_size': 16,
+            'model_type': 'lightweight',
+            'cosine_scale': 64.0,
+            'label_smoothing': 0.2,
+            'warmup_epochs': 10,
+        }
+    })
+
+    # Aggressive: Fast training
+    experiments.append({
+        'name': 'extreme_aggressive',
+        'description': 'Aggressive: High LR, Low regularization',
+        'params': {
+            'lr': 0.003,
+            'batch_size': 16,
+            'model_type': 'lightweight',
+            'cosine_scale': 20.0,
+            'label_smoothing': 0.0,
+            'warmup_epochs': 0,
+        }
+    })
+
+    # Full model optimized
+    experiments.append({
+        'name': 'extreme_full_optimized',
+        'description': 'Full model with optimized settings',
+        'params': {
+            'lr': 0.0003,
+            'batch_size': 8,
+            'model_type': 'full',
+            'cosine_scale': 40.0,
+            'label_smoothing': 0.1,
+            'warmup_epochs': 10,
+        }
+    })
+
+    return experiments
 
 
 # =============================================
-# NEW: Label Smoothing Loss
+# EXPERIMENT RUNNER
 # =============================================
-class LabelSmoothingCrossEntropy(nn.Module):
-    """
-    Cross entropy loss with label smoothing.
-    Prevents over-confident predictions by smoothing hard labels.
-    """
 
-    def __init__(self, smoothing=0.1):
-        super().__init__()
-        self.smoothing = smoothing
-        self.confidence = 1.0 - smoothing
-
-    def forward(self, pred, target):
-        # pred: (batch_size, num_classes) logits
-        # target: (batch_size,) class indices
-
-        log_probs = F.log_softmax(pred, dim=1)
-        num_classes = pred.size(1)
-
-        # Create smoothed labels
-        with torch.no_grad():
-            true_dist = torch.zeros_like(log_probs)
-            true_dist.fill_(self.smoothing / (num_classes - 1))
-            true_dist.scatter_(1, target.unsqueeze(1), self.confidence)
-
-        return torch.mean(torch.sum(-true_dist * log_probs, dim=1))
-
-
-# =============================================
-# NEW: Warmup Scheduler
-# =============================================
-class WarmupScheduler:
-    """
-    Linear warmup followed by another scheduler.
-    """
-
-    def __init__(self, optimizer, warmup_epochs, base_scheduler=None):
-        self.optimizer = optimizer
-        self.warmup_epochs = warmup_epochs
-        self.base_scheduler = base_scheduler
-        self.current_epoch = 0
-        self.base_lr = optimizer.param_groups[0]['lr']
-
-    def step(self, *args, **kwargs):
-        self.current_epoch += 1
-
-        if self.current_epoch <= self.warmup_epochs:
-            # Linear warmup
-            lr = self.base_lr * (self.current_epoch / self.warmup_epochs)
-            for param_group in self.optimizer.param_groups:
-                param_group['lr'] = lr
-        elif self.base_scheduler is not None:
-            # Use base scheduler after warmup
-            self.base_scheduler.step(*args, **kwargs)
-
-    def get_last_lr(self):
-        return [group['lr'] for group in self.optimizer.param_groups]
-
-
-# =============================================
-# Modified Model Wrapper with Cosine Classifier
-# =============================================
-class ModelWithCosineClassifier(nn.Module):
-    """
-    Wraps backbone and replaces final layer with cosine classifier.
-    """
-
-    def __init__(self, backbone, num_classes, embedding_dim, scale=30.0):
-        super().__init__()
-        self.backbone = backbone
-
-        # Remove the final classification layer from backbone
-        if hasattr(backbone, 'fc'):
-            self.embedding_dim = backbone.fc.in_features
-            backbone.fc = nn.Identity()
-        elif hasattr(backbone, 'classifier'):
-            self.embedding_dim = backbone.classifier.in_features
-            backbone.classifier = nn.Identity()
-        else:
-            self.embedding_dim = embedding_dim
-
-        # Add cosine classifier
-        self.cosine_classifier = CosineClassifier(self.embedding_dim, num_classes, scale)
-
-    def forward(self, x):
-        embeddings = self.backbone(x)
-        logits = self.cosine_classifier(embeddings)
-        return logits
-
-
-def setup_logging(log_dir):
-    """Setup comprehensive logging for training"""
-    os.makedirs(log_dir, exist_ok=True)
-
-    # Create logger
-    logger = logging.getLogger('training_2d')
-    logger.setLevel(logging.INFO)
-
-    # Remove existing handlers
-    for handler in logger.handlers[:]:
-        logger.removeHandler(handler)
-
-    # File handler
-    log_file = os.path.join(log_dir, f'training_2d_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log')
-    file_handler = logging.FileHandler(log_file)
-    file_handler.setLevel(logging.INFO)
-
-    # Console handler
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-
-    # Formatter
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    file_handler.setFormatter(formatter)
-    console_handler.setFormatter(formatter)
-
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
-
-    return logger
-
-
-def plot_training_curves(history, save_path):
-    """Plot and save training curves for 2D training"""
-    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
-
-    # Training Loss
-    axes[0, 0].plot(history['train_loss'], 'b-', label='Training Loss')
-    axes[0, 0].set_title('Training Loss')
-    axes[0, 0].set_xlabel('Epoch')
-    axes[0, 0].set_ylabel('Loss')
-    axes[0, 0].grid(True, alpha=0.3)
-    axes[0, 0].legend()
-
-    # Training vs Validation Accuracy
-    axes[0, 1].plot(history['train_acc'], 'b-', label='Training Accuracy')
-    axes[0, 1].plot(history['val_acc'], 'r-', label='Validation Accuracy')
-    axes[0, 1].set_title('Training vs Validation Accuracy')
-    axes[0, 1].set_xlabel('Epoch')
-    axes[0, 1].set_ylabel('Accuracy')
-    axes[0, 1].grid(True, alpha=0.3)
-    axes[0, 1].legend()
-
-    # Learning Rate (if available)
-    if 'learning_rate' in history:
-        axes[1, 0].plot(history['learning_rate'], 'g-', label='Learning Rate')
-        axes[1, 0].set_title('Learning Rate Schedule')
-        axes[1, 0].set_xlabel('Epoch')
-        axes[1, 0].set_ylabel('Learning Rate')
-        axes[1, 0].grid(True, alpha=0.3)
-        axes[1, 0].legend()
-        axes[1, 0].set_yscale('log')
-
-    # Validation Loss (if available)
-    if 'val_loss' in history:
-        axes[1, 1].plot(history['train_loss'], 'b-', label='Training Loss')
-        axes[1, 1].plot(history['val_loss'], 'r-', label='Validation Loss')
-        axes[1, 1].set_title('Training vs Validation Loss')
-        axes[1, 1].set_xlabel('Epoch')
-        axes[1, 1].set_ylabel('Loss')
-        axes[1, 1].grid(True, alpha=0.3)
-        axes[1, 1].legend()
-    else:
-        # Overfitting indicator
-        axes[1, 1].plot(np.array(history['train_acc']) - np.array(history['val_acc']), 'purple',
-                        label='Train-Val Accuracy Gap')
-        axes[1, 1].set_title('Overfitting Indicator (Train-Val Gap)')
-        axes[1, 1].set_xlabel('Epoch')
-        axes[1, 1].set_ylabel('Accuracy Difference')
-        axes[1, 1].grid(True, alpha=0.3)
-        axes[1, 1].legend()
-        axes[1, 1].axhline(y=0, color='red', linestyle='--', alpha=0.5)
-
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-
-
-def calculate_metrics(outputs, targets):
-    """Calculate additional training metrics"""
-    with torch.no_grad():
-        preds = outputs.argmax(dim=1)
-
-        # Basic accuracy
-        accuracy = (preds == targets).float().mean().item()
-
-        # Per-class accuracy
-        num_classes = outputs.shape[1]
-        per_class_acc = []
-        for class_id in range(num_classes):
-            class_mask = targets == class_id
-            if class_mask.sum() > 0:
-                class_acc = (preds[class_mask] == targets[class_mask]).float().mean().item()
-                per_class_acc.append(class_acc)
-            else:
-                per_class_acc.append(0.0)
-
-        # Confidence statistics
-        probs = F.softmax(outputs, dim=1)
-        max_probs = probs.max(dim=1)[0]
-        avg_confidence = max_probs.mean().item()
-
-        return accuracy, per_class_acc, avg_confidence
-
-
-def get_memory_usage():
-    """Get current memory usage in GB"""
-    try:
-        import psutil
-        process = psutil.Process()
-        memory_mb = process.memory_info().rss / 1024 / 1024
-        return memory_mb / 1024  # Convert to GB
-    except ImportError:
-        return 0.0  # Return 0 if psutil not available
-
-
-def save_confusion_matrix_torch(y_true, y_pred, num_classes, save_path, class_names=None):
-    # Initialize confusion matrix
-    cm = torch.zeros(num_classes, num_classes, dtype=torch.int64)
-
-    for t, p in zip(y_true, y_pred):
-        cm[t, p] += 1
-
-    cm = cm.numpy()
-
-    # Save raw confusion matrix as CSV for later use
-    csv_path = save_path.replace(".png", ".csv")
-    np.savetxt(csv_path, cm, delimiter=",", fmt="%d")
-
-    # Normalize per row (to show proportions)
-    with np.errstate(all='ignore'):
-        cm_normalized = cm.astype(np.float32) / cm.sum(axis=1, keepdims=True)
-    cm_normalized = np.nan_to_num(cm_normalized)
-
-    # Plot
-    fig, ax = plt.subplots(figsize=(10, 10))
-    im = ax.imshow(cm, interpolation="nearest", cmap="Blues")
-    plt.colorbar(im, ax=ax)
-
-    # Tick marks
-    if class_names is None:
-        class_names = [str(i) for i in range(num_classes)]
-    ax.set_xticks(np.arange(num_classes))
-    ax.set_yticks(np.arange(num_classes))
-    ax.set_xticklabels(class_names, rotation=45, ha="right")
-    ax.set_yticklabels(class_names)
-
-    # Labels
-    ax.set_xlabel("Predicted label")
-    ax.set_ylabel("True label")
-    ax.set_title("Confusion Matrix")
-
-    # Annotate cells
-    # Annotate only non-zero cells
-    thresh = cm_normalized.max() / 2.
-    for i in range(num_classes):
-        for j in range(num_classes):
-            if cm[i, j] > 0:
-                ax.text(j, i, f"{cm_normalized[i, j]:.2f}",
-                        ha="center", va="center",
-                        color="white" if cm_normalized[i, j] > thresh else "black",
-                        fontsize=6)
-
-    step = max(1, num_classes // 20)  # show ~20 ticks max
-    ax.set_xticks(np.arange(0, num_classes, step))
-    ax.set_yticks(np.arange(0, num_classes, step))
-    ax.set_xticklabels([class_names[i] for i in range(0, num_classes, step)], rotation=45, ha="right")
-    ax.set_yticklabels([class_names[i] for i in range(0, num_classes, step)])
-
-    csv_path = save_path.replace(".csv", ".png")
-    plt.tight_layout()
-    plt.savefig(save_path)
-    plt.close(fig)
-
-
-def spectrogram_trainer_2d(data_path, user_ids,
-                           model_path, normalization_method='log_scale',
-                           model_type='lightweight', batch_size=2, epochs=100, lr=0.001, device=None,
-                           use_augmentation=False, save_model_checkpoints=True, checkpoint_every=10,
-                           max_cache_size=100,
-                           use_cosine_classifier=True, cosine_scale=30.0,
-                           label_smoothing=0.1, warmup_epochs=5):
-    """
-    Session-based PyTorch 2D spectrogram trainer with cosine classifier, label smoothing, and warmup.
-
-    New parameters:
-        use_cosine_classifier (bool): Whether to use cosine classifier instead of linear (default: True)
-        cosine_scale (float): Temperature scaling for cosine classifier (default: 30.0)
-        label_smoothing (float): Label smoothing factor (default: 0.1)
-        warmup_epochs (int): Number of warmup epochs for learning rate (default: 5)
-    """
-    if device is None:
-        if torch.cuda.is_available():
-            try:
-                # Test if CUDA actually works
-                torch.cuda.empty_cache()
-                device = 'cuda'
-            except RuntimeError:
-                print("Warning: CUDA available but not working, falling back to CPU")
-                device = 'cpu'
-        else:
-            device = 'cpu'
-    print(f"Using device: {device}")
-
-    # Force CPU if CUDA is requested but not available
-    if device == 'cuda' and not torch.cuda.is_available():
-        print("Warning: CUDA requested but not available, using CPU")
-        device = 'cpu'
-
-    # Create checkpoint directory
-    if save_model_checkpoints:
-        os.makedirs(model_path, exist_ok=True)
-
-        # Create unique identifier for this training run
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        classifier_type = "cosine" if use_cosine_classifier else "linear"
-        run_id = f"{normalization_method}_{model_type}_{classifier_type}_{len(user_ids)}users_{timestamp}"
-        run_checkpoint_dir = os.path.join(model_path, run_id)
-        os.makedirs(run_checkpoint_dir, exist_ok=True)
-
-        # Setup logging
-        logger = setup_logging(run_checkpoint_dir)
-        logger.info(f"Starting 2D training run: {run_id}")
-        logger.info(f"Cosine Classifier: {use_cosine_classifier}, Scale: {cosine_scale}")
-        logger.info(f"Label Smoothing: {label_smoothing}, Warmup Epochs: {warmup_epochs}")
-        logger.info(f"Model checkpoints will be saved to: {run_checkpoint_dir}")
-
-    # --------------------------
-    # Create session-based data loaders (NO DATA LEAKAGE)
-    # --------------------------
-    logger.info("Creating session-based data loaders (NO DATA LEAKAGE)...")
-    logger.info("Split strategy: 10 sessions train, 2 sessions val, 2 sessions test per user")
-    start_time = time.time()
-
-    # Log initial memory usage
-    initial_memory = get_memory_usage()
-    logger.info(f"Initial memory usage: {initial_memory:.2f} GB")
+def run_single_experiment(exp_name, exp_description, exp_params, results_dir):
+    """Run a single experiment and return results"""
+    print(f"\n{'=' * 80}")
+    print(f"Running: {exp_name}")
+    print(f"Description: {exp_description}")
+    print(f"Parameters: {exp_params}")
+    print('=' * 80)
 
     try:
-        # Use session-based splitting to avoid data leakage
-        train_loader, val_loader, test_loader, sessions = create_session_based_dataloaders(
-            data_path=data_path,
-            user_ids=user_ids,
-            normalization=normalization_method,
-            batch_size=batch_size,
-            augment_train=use_augmentation,
-            cache_size=max_cache_size
-        )
+        full_params = {**COMMON_PARAMS, **exp_params}
+        full_params['model_path'] = os.path.join(results_dir, exp_name)
+
+        test_acc, kappa_score = spectrogram_trainer_2d(**full_params)
+
+        result = {
+            'experiment': exp_name,
+            'description': exp_description,
+            'test_accuracy': test_acc,
+            'kappa_score': kappa_score,
+            'collapsed': kappa_score < 0.1,
+            **exp_params
+        }
+
+        print(f"\n✓ COMPLETED: Test Accuracy = {test_acc:.4f}, Kappa = {kappa_score:.4f}")
+        print(f"  Status: {'COLLAPSED ❌' if result['collapsed'] else 'SUCCESS ✓'}")
+
+        return result
 
     except Exception as e:
-        logger.error(f"Error creating data loaders: {e}")
-        raise
+        print(f"\n✗ FAILED: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {
+            'experiment': exp_name,
+            'description': exp_description,
+            'test_accuracy': 0.0,
+            'kappa_score': 0.0,
+            'collapsed': True,
+            'error': str(e),
+            **exp_params
+        }
 
-    data_load_time = time.time() - start_time
-    logger.info(f"Session-based data loader creation completed in {data_load_time:.2f}s")
 
-    # Log memory usage after data loader creation
-    post_loader_memory = get_memory_usage()
-    logger.info(f"Memory usage after data loader creation: {post_loader_memory:.2f} GB")
+def run_efficient_ablation_study():
+    """Run the efficient ablation study"""
 
-    # Get dataset sizes and a sample to determine input shape
-    train_size = len(train_loader.dataset)
-    val_size = len(val_loader.dataset)
-    test_size = len(test_loader.dataset)
+    # Create results directory
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    results_dir = os.path.join(MODEL_PATH, f'efficient_ablation_{timestamp}')
+    os.makedirs(results_dir, exist_ok=True)
 
-    logger.info(f"Session-based dataset sizes - Train: {train_size}, Val: {val_size}, Test: {test_size}")
+    # Create visualization subdirectory
+    vis_dir = os.path.join(results_dir, 'visualizations')
+    os.makedirs(vis_dir, exist_ok=True)
 
-    # Get sample batch to determine input shape
-    sample_batch = next(iter(train_loader))
-    input_shape = sample_batch[0].shape[1:]  # Remove batch dimension
-    num_classes = len(user_ids)
+    # Get experiment list
+    experiments = create_efficient_experiment_set()
 
-    logger.info(f"Input shape: {input_shape}")
-    logger.info(f"Number of classes (users): {num_classes}")
-    logger.info(f"Spectrogram dimensions: {input_shape[1:]} (height x width)")
+    print("=" * 80)
+    print("EFFICIENT ABLATION STUDY")
+    print(f"Users: {len(USER_IDS)} (S{USER_IDS[0]:03d} to S{USER_IDS[-1]:03d})")
+    print(f"Total experiments: {len(experiments)}")
+    print(f"Results directory: {results_dir}")
+    print("=" * 80)
+    print("\nExperiment groups:")
+    print("  - Baseline: 1 experiment")
+    print("  - One-at-a-time variations: 11 experiments")
+    print("  - Critical interactions: 6 experiments")
+    print("  - Extreme configurations: 3 experiments")
+    print(f"  TOTAL: {len(experiments)} experiments")
+    print("=" * 80)
 
-    # Update DataLoader settings for memory efficiency
-    train_loader = DataLoader(
-        train_loader.dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=0,  # Reduced from 4 to avoid memory issues
-        pin_memory=False,  # Disabled to save memory
-        persistent_workers=False
-    )
-    val_loader = DataLoader(
-        val_loader.dataset,
-        batch_size=batch_size,
-        num_workers=0,
-        pin_memory=False,
-        persistent_workers=False
-    )
-    test_loader = DataLoader(
-        test_loader.dataset,
-        batch_size=batch_size,
-        num_workers=0,
-        pin_memory=False,
-        persistent_workers=False
-    )
+    # Run all experiments
+    results = []
+    for idx, exp in enumerate(experiments, 1):
+        print(f"\n{'=' * 80}")
+        print(f"EXPERIMENT {idx}/{len(experiments)}")
+        print('=' * 80)
 
-    logger.info(f"Batch size: {batch_size}, Total batches per epoch: {len(train_loader)}")
-    logger.info(f"Using augmentation: {use_augmentation}")
-    logger.info(f"Cache size: {max_cache_size}")
-    logger.info(f"User IDs included: {user_ids[:5]}...{user_ids[-5:] if len(user_ids) > 5 else user_ids}")
-
-    # --------------------------
-    # Build model with cosine classifier
-    # --------------------------
-    input_channels = input_shape[0]  # Should be 1 for grayscale spectrograms
-
-    if model_type == 'lightweight':
-        backbone = LightweightSpectrogramResNet(
-            input_channels=input_channels,
-            num_classes=num_classes,
-            channels=[32, 64, 128]
+        result = run_single_experiment(
+            exp['name'],
+            exp['description'],
+            exp['params'],
+            results_dir
         )
-        embedding_dim = 128  # Last channel dimension
-    elif model_type == 'full':
-        backbone = SpectrogramResNet(
-            input_channels=input_channels,
-            num_classes=num_classes,
-            channels=[64, 128, 256, 512]
-        )
-        embedding_dim = 512  # Last channel dimension
-    else:
-        raise ValueError(f"Unknown model type: {model_type}")
+        results.append(result)
 
-    # Wrap with cosine classifier if requested
-    if use_cosine_classifier:
-        model = ModelWithCosineClassifier(backbone, num_classes, embedding_dim, scale=cosine_scale)
-        logger.info(f"Using Cosine Classifier with scale={cosine_scale}")
-    else:
-        model = backbone
-        logger.info("Using standard Linear Classifier")
+        # Save intermediate results
+        interim_df = pd.DataFrame(results)
+        interim_df.to_csv(os.path.join(results_dir, 'interim_results.csv'), index=False)
 
-    if torch.cuda.device_count() > 1:
-        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
-        model = nn.DataParallel(model)
-    model = model.to(device)
+    # Create final dataframe
+    results_df = pd.DataFrame(results)
+    results_df.to_csv(os.path.join(results_dir, 'all_results.csv'), index=False)
 
-    # Log model info
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info(f"Model architecture: {model_type}")
-    logger.info(f"Total parameters: {total_params:,}")
-    logger.info(f"Trainable parameters: {trainable_params:,}")
+    # Generate visualizations
+    print("\n" + "=" * 80)
+    print("GENERATING VISUALIZATIONS")
+    print("=" * 80)
 
-    # --------------------------
-    # Training setup with label smoothing and warmup
-    # --------------------------
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    plot_oat_analysis(results_df, vis_dir)
+    plot_model_comparison(results_df, vis_dir)
+    plot_batch_size_comparison(results_df, vis_dir)
+    plot_interaction_effects(results_df, vis_dir)
+    plot_overall_ranking(results_df, vis_dir)
 
-    # Use label smoothing loss
-    criterion = LabelSmoothingCrossEntropy(smoothing=label_smoothing)
-    logger.info(f"Using Label Smoothing Cross Entropy with smoothing={label_smoothing}")
+    # Generate tables
+    create_summary_table(results_df, vis_dir)
+    create_top_configurations_table(results_df, vis_dir, top_n=10)
 
-    # Learning rate scheduler with warmup
-    base_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='max', factor=0.7, patience=15, min_lr=1e-6
-    )
-    scheduler = WarmupScheduler(optimizer, warmup_epochs=warmup_epochs, base_scheduler=base_scheduler)
-    logger.info(f"Using warmup for {warmup_epochs} epochs, then ReduceLROnPlateau")
+    # Generate report
+    generate_final_report(results_df, results_dir)
 
-    best_val_acc = 0.0
-    best_model_state = None
-    epochs_without_improvement = 0
-    early_stopping_patience = 25
+    return results_df
 
-    training_history = {
-        'train_loss': [],
-        'train_acc': [],
-        'val_loss': [],
-        'val_acc': [],
-        'learning_rate': [],
-        'per_class_train_acc': [],
-        'per_class_val_acc': [],
-        'train_confidence': [],
-        'val_confidence': [],
-        'epochs_completed': 0
+
+# =============================================
+# VISUALIZATION FUNCTIONS
+# =============================================
+
+def plot_oat_analysis(df, save_dir):
+    """Figure 1: One-at-a-time parameter effects"""
+    oat_experiments = df[df['experiment'].str.startswith('oat_')]
+    baseline = df[df['experiment'] == 'baseline_recommended'].iloc[0]
+
+    if len(oat_experiments) == 0:
+        return
+
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    axes = axes.flatten()
+
+    # Group by parameter type
+    param_groups = {
+        'Learning Rate': oat_experiments[oat_experiments['experiment'].str.contains('lr')],
+        'Cosine Scale': oat_experiments[oat_experiments['experiment'].str.contains('scale')],
+        'Label Smoothing': oat_experiments[oat_experiments['experiment'].str.contains('smoothing')],
+        'Warmup Epochs': oat_experiments[oat_experiments['experiment'].str.contains('warmup')],
+        'Batch Size': oat_experiments[oat_experiments['experiment'].str.contains('batch')],
+        'Model Type': oat_experiments[oat_experiments['experiment'].str.contains('model')],
     }
 
-    def save_training_checkpoint(epoch, model, optimizer, train_loss, train_acc, val_acc, is_best=False):
-        """Save training checkpoint"""
-        if not save_model_checkpoints:
-            return
+    for idx, (param_name, group) in enumerate(param_groups.items()):
+        ax = axes[idx]
 
-        checkpoint = {
-            'epoch': epoch,
-            'model_state_dict': model.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'train_loss': train_loss,
-            'train_acc': train_acc,
-            'val_acc': val_acc,
-            'best_val_acc': best_val_acc,
-            'training_history': training_history,
-            'model_config': {
-                'input_channels': input_channels,
-                'num_classes': num_classes,
-                'num_users': len(user_ids),
-                'user_ids': user_ids,
-                'normalization_method': normalization_method,
-                'model_type': model_type,
-                'use_augmentation': use_augmentation,
-                'split_type': 'session_based',
-                'use_cosine_classifier': use_cosine_classifier,
-                'cosine_scale': cosine_scale,
-                'label_smoothing': label_smoothing,
-                'warmup_epochs': warmup_epochs
-            }
-        }
+        if len(group) == 0:
+            ax.axis('off')
+            continue
 
-        # Save regular checkpoint
-        checkpoint_path = os.path.join(run_checkpoint_dir, f'checkpoint_epoch_{epoch}.pt')
-        torch.save(checkpoint, checkpoint_path)
+        # Add baseline
+        all_data = pd.concat([pd.DataFrame([baseline]), group])
 
-        # Save best model separately
-        if is_best:
-            best_model_path = os.path.join(run_checkpoint_dir, 'best_model.pt')
-            torch.save(checkpoint, best_model_path)
-            logger.info(f"New best model saved (val_acc: {val_acc:.4f})")
+        # Plot
+        x_pos = np.arange(len(all_data))
+        bars = ax.bar(x_pos, all_data['kappa_score'], alpha=0.7)
 
-        # Keep only last 3 regular checkpoints to save space
-        checkpoints = [f for f in os.listdir(run_checkpoint_dir) if f.startswith('checkpoint_epoch_')]
-        if len(checkpoints) > 3:
-            checkpoints.sort(key=lambda x: int(x.split('_')[-1].split('.')[0]))
-            for old_checkpoint in checkpoints[:-3]:
-                os.remove(os.path.join(run_checkpoint_dir, old_checkpoint))
+        # Color baseline differently
+        bars[0].set_color('green')
+        bars[0].set_alpha(0.9)
 
-    # --------------------------
-    # Training loop with memory management
-    # --------------------------
-    logger.info(f"Starting session-based training for {epochs} epochs...")
-    logger.info(f"Early stopping patience: {early_stopping_patience}")
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels([exp.split('_')[-1] if i > 0 else 'baseline'
+                            for i, exp in enumerate(all_data['experiment'])],
+                           rotation=45, ha='right')
+        ax.set_ylabel('Kappa Score')
+        ax.set_title(f'Effect of {param_name}')
+        ax.axhline(y=baseline['kappa_score'], color='green', linestyle='--', alpha=0.5)
+        ax.grid(axis='y', alpha=0.3)
 
-    training_start_time = time.time()
-    scaler = torch.cuda.amp.GradScaler() if device == 'cuda' else None
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, 'fig1_oat_analysis.png'), bbox_inches='tight')
+    plt.savefig(os.path.join(save_dir, 'fig1_oat_analysis.pdf'), bbox_inches='tight')
+    plt.close()
+    print(f"✓ Saved: fig1_oat_analysis.png/pdf")
 
-    for epoch in range(epochs):
-        epoch_start_time = time.time()
 
-        # Training phase
-        model.train()
-        running_loss = 0.0
-        all_train_outputs = []
-        all_train_targets = []
+def plot_model_comparison(df, save_dir):
+    """Figure 2: Model type comparison"""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
 
-        # Memory cleanup before epoch
-        if device == 'cuda':
-            torch.cuda.empty_cache()
-        gc.collect()
+    # Group by model type
+    lightweight = df[df['model_type'] == 'lightweight']
+    full = df[df['model_type'] == 'full']
 
-        for batch_idx, (xb, yb) in enumerate(train_loader):
-            xb, yb = xb.to(device), yb.to(device)
-            optimizer.zero_grad()
+    if len(lightweight) > 0 and len(full) > 0:
+        # Box plots
+        data_kappa = [lightweight['kappa_score'], full['kappa_score']]
+        data_acc = [lightweight['test_accuracy'], full['test_accuracy']]
 
-            if scaler and device == 'cuda':
-                with torch.cuda.amp.autocast():
-                    outputs = model(xb)
-                    loss = criterion(outputs, yb)
+        bp1 = ax1.boxplot(data_kappa, labels=['Lightweight', 'Full'], patch_artist=True)
+        bp1['boxes'][0].set_facecolor('lightblue')
+        bp1['boxes'][1].set_facecolor('lightcoral')
+        ax1.set_ylabel('Kappa Score')
+        ax1.set_title('Model Type Comparison: Kappa Score')
+        ax1.grid(axis='y', alpha=0.3)
 
-                    # Monitor probability distribution
-                    probs = F.softmax(outputs, dim=1)
-                    if batch_idx % 50 == 0:
-                        mean_probs = probs.mean(dim=0)
-                        max_prob = mean_probs.max().item()
-                        min_prob = mean_probs.min().item()
-                        std_prob = probs.std(dim=1).mean().item()
-                        logger.info(f"Epoch {epoch + 1} Batch {batch_idx}: "
-                                    f"max_mean_prob={max_prob:.4f}, min_mean_prob={min_prob:.4f}, "
-                                    f"avg_std={std_prob:.4f}")
+        bp2 = ax2.boxplot(data_acc, labels=['Lightweight', 'Full'], patch_artist=True)
+        bp2['boxes'][0].set_facecolor('lightblue')
+        bp2['boxes'][1].set_facecolor('lightcoral')
+        ax2.set_ylabel('Test Accuracy')
+        ax2.set_title('Model Type Comparison: Test Accuracy')
+        ax2.grid(axis='y', alpha=0.3)
 
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                outputs = model(xb)
-                loss = criterion(outputs, yb)
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, 'fig2_model_comparison.png'), bbox_inches='tight')
+    plt.savefig(os.path.join(save_dir, 'fig2_model_comparison.pdf'), bbox_inches='tight')
+    plt.close()
+    print(f"✓ Saved: fig2_model_comparison.png/pdf")
 
-                # Monitor probability distribution
-                if batch_idx % 50 == 0:
-                    probs = F.softmax(outputs, dim=1)
-                    mean_probs = probs.mean(dim=0)
-                    max_prob = mean_probs.max().item()
-                    min_prob = mean_probs.min().item()
-                    std_prob = probs.std(dim=1).mean().item()
-                    logger.info(f"Epoch {epoch + 1} Batch {batch_idx}: "
-                                f"max_mean_prob={max_prob:.4f}, min_mean_prob={min_prob:.4f}, "
-                                f"avg_std={std_prob:.4f}")
 
-                loss.backward()
-                optimizer.step()
+def plot_batch_size_comparison(df, save_dir):
+    """Figure 3: Batch size comparison"""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
 
-            running_loss += loss.item() * xb.size(0)
-            all_train_outputs.append(outputs.detach().cpu())  # Move to CPU to save GPU memory
-            all_train_targets.append(yb.detach().cpu())
+    # Group by batch size
+    batch8 = df[df['batch_size'] == 8]
+    batch16 = df[df['batch_size'] == 16]
 
-            # Periodic memory cleanup
-            if batch_idx % 20 == 0:
-                if device == 'cuda':
-                    torch.cuda.empty_cache()
-                gc.collect()
+    if len(batch8) > 0 and len(batch16) > 0:
+        # Box plots
+        data_kappa = [batch8['kappa_score'], batch16['kappa_score']]
+        data_acc = [batch8['test_accuracy'], batch16['test_accuracy']]
 
-                # Log memory usage periodically
-                if batch_idx % 100 == 0:
-                    current_memory = get_memory_usage()
-                    logger.debug(f"Epoch {epoch + 1}, Batch {batch_idx}: Memory usage: {current_memory:.2f} GB")
+        bp1 = ax1.boxplot(data_kappa, labels=['Batch 8', 'Batch 16'], patch_artist=True)
+        bp1['boxes'][0].set_facecolor('lightgreen')
+        bp1['boxes'][1].set_facecolor('lightyellow')
+        ax1.set_ylabel('Kappa Score')
+        ax1.set_title('Batch Size Comparison: Kappa Score')
+        ax1.grid(axis='y', alpha=0.3)
 
-        # Calculate training metrics
-        all_train_outputs = torch.cat(all_train_outputs).to(device)
-        all_train_targets = torch.cat(all_train_targets).to(device)
-        train_acc, per_class_train_acc, train_confidence = calculate_metrics(all_train_outputs, all_train_targets)
-        epoch_loss = running_loss / train_size
+        bp2 = ax2.boxplot(data_acc, labels=['Batch 8', 'Batch 16'], patch_artist=True)
+        bp2['boxes'][0].set_facecolor('lightgreen')
+        bp2['boxes'][1].set_facecolor('lightyellow')
+        ax2.set_ylabel('Test Accuracy')
+        ax2.set_title('Batch Size Comparison: Test Accuracy')
+        ax2.grid(axis='y', alpha=0.3)
 
-        # Clear training outputs from memory
-        del all_train_outputs, all_train_targets
-        if device == 'cuda':
-            torch.cuda.empty_cache()
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, 'fig3_batch_comparison.png'), bbox_inches='tight')
+    plt.savefig(os.path.join(save_dir, 'fig3_batch_comparison.pdf'), bbox_inches='tight')
+    plt.close()
+    print(f"✓ Saved: fig3_batch_comparison.png/pdf")
 
-        # Validation phase
-        model.eval()
-        val_loss = 0.0
-        all_val_outputs = []
-        all_val_targets = []
 
-        with torch.no_grad():
-            for batch_idx, (xb, yb) in enumerate(val_loader):
-                xb, yb = xb.to(device), yb.to(device)
-                outputs = model(xb)
-                loss = criterion(outputs, yb)
-                val_loss += loss.item() * xb.size(0)
-                all_val_outputs.append(outputs.cpu())  # Move to CPU
-                all_val_targets.append(yb.cpu())
+def plot_interaction_effects(df, save_dir):
+    """Figure 4: Interaction effects"""
+    interact_experiments = df[df['experiment'].str.startswith('interact_')]
 
-                # Memory cleanup during validation too
-                if batch_idx % 20 == 0 and device == 'cuda':
-                    torch.cuda.empty_cache()
+    if len(interact_experiments) == 0:
+        return
 
-        all_val_outputs = torch.cat(all_val_outputs).to(device)
-        all_val_targets = torch.cat(all_val_targets).to(device)
-        val_acc, per_class_val_acc, val_confidence = calculate_metrics(all_val_outputs, all_val_targets)
-        val_loss /= val_size
+    fig, ax = plt.subplots(figsize=(12, 6))
 
-        # Clear validation outputs from memory
-        del all_val_outputs, all_val_targets
-        if device == 'cuda':
-            torch.cuda.empty_cache()
+    # Sort by kappa score
+    interact_sorted = interact_experiments.sort_values('kappa_score', ascending=True)
 
-        # Learning rate scheduling
-        current_lr = optimizer.param_groups[0]['lr']
-        if epoch < warmup_epochs:
-            scheduler.step()
+    # Create horizontal bar chart
+    colors = plt.cm.viridis(interact_sorted['kappa_score'] / interact_sorted['kappa_score'].max())
+    bars = ax.barh(range(len(interact_sorted)), interact_sorted['kappa_score'], color=colors)
+
+    ax.set_yticks(range(len(interact_sorted)))
+    ax.set_yticklabels(interact_sorted['description'], fontsize=9)
+    ax.set_xlabel('Kappa Score')
+    ax.set_title('Interaction Effects: Combined Parameters')
+    ax.grid(axis='x', alpha=0.3)
+
+    # Annotate values
+    for i, (idx, row) in enumerate(interact_sorted.iterrows()):
+        ax.text(row['kappa_score'], i, f" {row['kappa_score']:.4f}",
+                va='center', fontsize=9)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, 'fig4_interactions.png'), bbox_inches='tight')
+    plt.savefig(os.path.join(save_dir, 'fig4_interactions.pdf'), bbox_inches='tight')
+    plt.close()
+    print(f"✓ Saved: fig4_interactions.png/pdf")
+
+
+def plot_overall_ranking(df, save_dir):
+    """Figure 5: Overall performance ranking"""
+    fig, ax = plt.subplots(figsize=(14, 10))
+
+    # Sort all successful experiments
+    successful = df[~df['collapsed']].sort_values('kappa_score', ascending=True)
+
+    if len(successful) == 0:
+        print("⚠ No successful experiments to plot")
+        return
+
+    # Color by experiment group
+    colors = []
+    for exp in successful['experiment']:
+        if 'baseline' in exp:
+            colors.append('green')
+        elif 'oat' in exp:
+            colors.append('blue')
+        elif 'interact' in exp:
+            colors.append('orange')
+        elif 'extreme' in exp:
+            colors.append('red')
         else:
-            scheduler.step(val_acc)
+            colors.append('gray')
 
-        # Update training history
-        training_history['train_loss'].append(epoch_loss)
-        training_history['train_acc'].append(train_acc)
-        training_history['val_loss'].append(val_loss)
-        training_history['val_acc'].append(val_acc)
-        training_history['learning_rate'].append(current_lr)
-        training_history['per_class_train_acc'].append(per_class_train_acc)
-        training_history['per_class_val_acc'].append(per_class_val_acc)
-        training_history['train_confidence'].append(train_confidence)
-        training_history['val_confidence'].append(val_confidence)
-        training_history['epochs_completed'] = epoch + 1
+    bars = ax.barh(range(len(successful)), successful['kappa_score'], color=colors, alpha=0.7)
 
-        # Check if this is the best model
-        is_best = val_acc > best_val_acc
-        if is_best:
-            best_val_acc = val_acc
-            best_model_state = model.state_dict().copy()  # Make a copy
-            epochs_without_improvement = 0
+    ax.set_yticks(range(len(successful)))
+    ax.set_yticklabels(successful['experiment'], fontsize=8)
+    ax.set_xlabel('Kappa Score')
+    ax.set_title('Overall Performance Ranking (All Configurations)')
+    ax.grid(axis='x', alpha=0.3)
+
+    # Add legend
+    from matplotlib.patches import Patch
+    legend_elements = [
+        Patch(facecolor='green', alpha=0.7, label='Baseline'),
+        Patch(facecolor='blue', alpha=0.7, label='One-at-a-time'),
+        Patch(facecolor='orange', alpha=0.7, label='Interactions'),
+        Patch(facecolor='red', alpha=0.7, label='Extreme configs')
+    ]
+    ax.legend(handles=legend_elements, loc='lower right')
+
+    # Highlight top 3
+    top3_indices = successful.nlargest(3, 'kappa_score').index
+    for idx, (i, row) in enumerate(successful.iterrows()):
+        if i in top3_indices:
+            ax.text(row['kappa_score'], idx, f"  ★ {row['kappa_score']:.4f}",
+                    va='center', fontweight='bold', fontsize=9)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, 'fig5_overall_ranking.png'), bbox_inches='tight')
+    plt.savefig(os.path.join(save_dir, 'fig5_overall_ranking.pdf'), bbox_inches='tight')
+    plt.close()
+    print(f"✓ Saved: fig5_overall_ranking.png/pdf")
+
+
+def create_summary_table(df, save_dir):
+    """Table 1: Summary statistics"""
+    summary_data = []
+
+    # Overall
+    summary_data.append({
+        'Category': 'All Experiments',
+        'Count': len(df),
+        'Mean Kappa': df['kappa_score'].mean(),
+        'Std Kappa': df['kappa_score'].std(),
+        'Max Kappa': df['kappa_score'].max(),
+        'Mean Accuracy': df['test_accuracy'].mean(),
+        'Max Accuracy': df['test_accuracy'].max(),
+    })
+
+    # By experiment group
+    for prefix, name in [('baseline', 'Baseline'), ('oat', 'One-at-a-time'),
+                         ('interact', 'Interactions'), ('extreme', 'Extreme')]:
+        group = df[df['experiment'].str.startswith(prefix)]
+        if len(group) > 0:
+            summary_data.append({
+                'Category': name,
+                'Count': len(group),
+                'Mean Kappa': group['kappa_score'].mean(),
+                'Std Kappa': group['kappa_score'].std(),
+                'Max Kappa': group['kappa_score'].max(),
+                'Mean Accuracy': group['test_accuracy'].mean(),
+                'Max Accuracy': group['test_accuracy'].max(),
+            })
+
+    # By model type
+    for model_type in ['lightweight', 'full']:
+        group = df[df['model_type'] == model_type]
+        if len(group) > 0:
+            summary_data.append({
+                'Category': f'Model: {model_type}',
+                'Count': len(group),
+                'Mean Kappa': group['kappa_score'].mean(),
+                'Std Kappa': group['kappa_score'].std(),
+                'Max Kappa': group['kappa_score'].max(),
+                'Mean Accuracy': group['test_accuracy'].mean(),
+                'Max Accuracy': group['test_accuracy'].max(),
+            })
+
+    summary_df = pd.DataFrame(summary_data)
+    summary_df.to_csv(os.path.join(save_dir, 'table1_summary.csv'), index=False)
+
+    latex_table = summary_df.to_latex(index=False, float_format="%.4f")
+    with open(os.path.join(save_dir, 'table1_summary.tex'), 'w') as f:
+        f.write(latex_table)
+
+    print(f"✓ Saved: table1_summary.csv/tex")
+    return summary_df
+
+
+def create_top_configurations_table(df, save_dir, top_n=10):
+    """Table 2: Top configurations"""
+    successful = df[~df['collapsed']].copy()
+    top_configs = successful.nlargest(min(top_n, len(successful)), 'kappa_score')
+
+    columns = ['experiment', 'kappa_score', 'test_accuracy', 'model_type',
+               'batch_size', 'lr', 'cosine_scale', 'label_smoothing', 'warmup_epochs']
+    columns = [col for col in columns if col in top_configs.columns]
+
+    top_display = top_configs[columns].copy()
+    top_display.to_csv(os.path.join(save_dir, 'table2_top_configs.csv'), index=False)
+
+    latex_table = top_display.to_latex(index=False, float_format="%.4f")
+    with open(os.path.join(save_dir, 'table2_top_configs.tex'), 'w') as f:
+        f.write(latex_table)
+
+    print(f"✓ Saved: table2_top_configs.csv/tex")
+    return top_display
+
+
+def generate_final_report(df, results_dir):
+    """Generate comprehensive text report"""
+    lines = []
+    lines.append("=" * 80)
+    lines.append("EFFICIENT ABLATION STUDY - FINAL REPORT")
+    lines.append("=" * 80)
+    lines.append(f"\nGenerated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"Total experiments: {len(df)}")
+    lines.append(f"Successful (no collapse): {len(df[~df['collapsed']])}")
+
+    # Best overall
+    best = df.nlargest(1, 'kappa_score').iloc[0]
+    lines.append("\n" + "=" * 80)
+    lines.append("BEST CONFIGURATION")
+    lines.append("=" * 80)
+    lines.append(f"Experiment: {best['experiment']}")
+    lines.append(f"Kappa Score: {best['kappa_score']:.4f}")
+    lines.append(f"Test Accuracy: {best['test_accuracy']:.4f}")
+    lines.append(f"\nHyperparameters:")
+    lines.append(f"  Model Type: {best['model_type']}")
+    lines.append(f"  Batch Size: {best['batch_size']}")
+    lines.append(f"  Learning Rate: {best['lr']}")
+    lines.append(f"  Cosine Scale: {best['cosine_scale']}")
+    lines.append(f"  Label Smoothing: {best['label_smoothing']}")
+    lines.append(f"  Warmup Epochs: {best['warmup_epochs']}")
+
+    # Key insights from OAT analysis
+    lines.append("\n" + "=" * 80)
+    lines.append("KEY INSIGHTS FROM ONE-AT-A-TIME ANALYSIS")
+    lines.append("=" * 80)
+
+    baseline = df[df['experiment'] == 'baseline_recommended'].iloc[0]
+    baseline_kappa = baseline['kappa_score']
+
+    oat_experiments = df[df['experiment'].str.startswith('oat_')]
+
+    lines.append(f"\nBaseline Kappa: {baseline_kappa:.4f}")
+    lines.append("\nParameter Sensitivity (change from baseline):")
+
+    for _, row in oat_experiments.iterrows():
+        delta = row['kappa_score'] - baseline_kappa
+        direction = "↑" if delta > 0 else "↓"
+        lines.append(f"  {row['experiment']}: {direction} {abs(delta):.4f} (Kappa: {row['kappa_score']:.4f})")
+
+    # Model comparison
+    lines.append("\n" + "=" * 80)
+    lines.append("MODEL TYPE COMPARISON")
+    lines.append("=" * 80)
+
+    lightweight = df[df['model_type'] == 'lightweight']
+    full = df[df['model_type'] == 'full']
+
+    if len(lightweight) > 0 and len(full) > 0:
+        lines.append(f"\nLightweight model:")
+        lines.append(f"  Mean Kappa: {lightweight['kappa_score'].mean():.4f} ± {lightweight['kappa_score'].std():.4f}")
+        lines.append(f"  Best Kappa: {lightweight['kappa_score'].max():.4f}")
+
+        lines.append(f"\nFull model:")
+        lines.append(f"  Mean Kappa: {full['kappa_score'].mean():.4f} ± {full['kappa_score'].std():.4f}")
+        lines.append(f"  Best Kappa: {full['kappa_score'].max():.4f}")
+
+        if full['kappa_score'].mean() > lightweight['kappa_score'].mean():
+            lines.append("\n→ Full model shows better average performance")
         else:
-            epochs_without_improvement += 1
+            lines.append("\n→ Lightweight model is more efficient with similar performance")
 
-        # Calculate epoch time
-        epoch_time = time.time() - epoch_start_time
-        current_memory = get_memory_usage()
+    # Batch size comparison
+    lines.append("\n" + "=" * 80)
+    lines.append("BATCH SIZE COMPARISON")
+    lines.append("=" * 80)
 
-        # Detailed logging every epoch
-        if (epoch + 1) % 5 == 0 or epoch == 0 or is_best:
-            logger.info(f"Epoch {epoch + 1:3d}/{epochs} | "
-                        f"Time: {epoch_time:.1f}s | "
-                        f"Memory: {current_memory:.1f}GB | "
-                        f"LR: {current_lr:.2e} | "
-                        f"Train Loss: {epoch_loss:.4f} | "
-                        f"Train Acc: {train_acc:.4f} | "
-                        f"Val Loss: {val_loss:.4f} | "
-                        f"Val Acc: {val_acc:.4f} | "
-                        f"Train Conf: {train_confidence:.3f} | "
-                        f"Val Conf: {val_confidence:.3f} | "
-                        f"Best Val: {best_val_acc:.4f}" +
-                        (" NEW BEST" if is_best else ""))
+    batch8 = df[df['batch_size'] == 8]
+    batch16 = df[df['batch_size'] == 16]
 
-            # Per-class accuracy logging (less frequent to avoid spam)
-            if (epoch + 1) % 20 == 0:
-                logger.info(f"Per-class Train Acc: {[f'{acc:.3f}' for acc in per_class_train_acc]}")
-                logger.info(f"Per-class Val Acc:   {[f'{acc:.3f}' for acc in per_class_val_acc]}")
+    if len(batch8) > 0 and len(batch16) > 0:
+        lines.append(f"\nBatch size 8:")
+        lines.append(f"  Mean Kappa: {batch8['kappa_score'].mean():.4f} ± {batch8['kappa_score'].std():.4f}")
+        lines.append(f"  Best Kappa: {batch8['kappa_score'].max():.4f}")
 
-        # Save checkpoint
-        if save_model_checkpoints and (epoch + 1) % checkpoint_every == 0:
-            save_training_checkpoint(epoch, model, optimizer, epoch_loss, train_acc, val_acc, is_best)
+        lines.append(f"\nBatch size 16:")
+        lines.append(f"  Mean Kappa: {batch16['kappa_score'].mean():.4f} ± {batch16['kappa_score'].std():.4f}")
+        lines.append(f"  Best Kappa: {batch16['kappa_score'].max():.4f}")
 
-        # Early stopping check
-        if epochs_without_improvement >= early_stopping_patience:
-            logger.info(f"Early stopping triggered after {epochs_without_improvement} epochs without improvement")
-            break
+        if batch16['kappa_score'].mean() > batch8['kappa_score'].mean():
+            lines.append("\n→ Batch size 16 shows better performance and faster training")
+        else:
+            lines.append("\n→ Batch size 8 may provide better regularization")
 
-        # Plot training curves every 25 epochs
-        if save_model_checkpoints and (epoch + 1) % 25 == 0:
-            plot_path = os.path.join(run_checkpoint_dir, f'training_curves_epoch_{epoch + 1}.png')
-            plot_training_curves(training_history, plot_path)
+    # Interaction insights
+    lines.append("\n" + "=" * 80)
+    lines.append("INTERACTION EFFECTS")
+    lines.append("=" * 80)
 
-        # Memory cleanup at end of epoch
-        if device == 'cuda':
-            torch.cuda.empty_cache()
-        gc.collect()
+    interact_experiments = df[df['experiment'].str.startswith('interact_')]
+    if len(interact_experiments) > 0:
+        lines.append("\nInteraction experiment results:")
+        for _, row in interact_experiments.iterrows():
+            lines.append(f"  {row['description']}: Kappa = {row['kappa_score']:.4f}")
 
-    # Training completed
-    total_training_time = time.time() - training_start_time
-    logger.info(f"Session-based training completed in {total_training_time:.2f}s")
-    logger.info(f"Best validation accuracy: {best_val_acc:.4f}")
+        best_interact = interact_experiments.nlargest(1, 'kappa_score').iloc[0]
+        lines.append(f"\nBest interaction: {best_interact['description']}")
+        lines.append(f"  Kappa: {best_interact['kappa_score']:.4f}")
 
-    # Save final checkpoint
-    if save_model_checkpoints:
-        save_training_checkpoint(epoch, model, optimizer, epoch_loss, train_acc, val_acc,
-                                 val_acc >= best_val_acc)
+    # Recommendations
+    lines.append("\n" + "=" * 80)
+    lines.append("RECOMMENDATIONS FOR THESIS")
+    lines.append("=" * 80)
 
-        # Save training history
-        history_file = os.path.join(run_checkpoint_dir, 'training_history.json')
-        with open(history_file, 'w') as f:
-            # Convert numpy types to Python types for JSON serialization
-            history_json = {
-                'train_loss': [float(x) for x in training_history['train_loss']],
-                'train_acc': [float(x) for x in training_history['train_acc']],
-                'val_loss': [float(x) for x in training_history['val_loss']],
-                'val_acc': [float(x) for x in training_history['val_acc']],
-                'learning_rate': [float(x) for x in training_history['learning_rate']],
-                'epochs_completed': int(training_history['epochs_completed']),
-                'best_val_acc': float(best_val_acc),
-                'total_training_time': float(total_training_time),
-                'early_stopped': epochs_without_improvement >= early_stopping_patience,
-                'num_users': len(user_ids),
-                'user_ids': user_ids,
-                'split_method': 'session_based',
-                'use_cosine_classifier': use_cosine_classifier,
-                'cosine_scale': cosine_scale,
-                'label_smoothing': label_smoothing,
-                'warmup_epochs': warmup_epochs
-            }
-            json.dump(history_json, f, indent=2)
+    lines.append("\n1. Optimal Configuration:")
+    lines.append(f"   Use: {best['experiment']}")
+    lines.append(f"   Expected Kappa: ~{best['kappa_score']:.3f}")
 
-        # Create final training curves plot
-        final_plot_path = os.path.join(run_checkpoint_dir, 'final_training_curves.png')
-        plot_training_curves(training_history, final_plot_path)
+    lines.append("\n2. Most Important Parameters (by sensitivity):")
+    oat_sorted = oat_experiments.copy()
+    oat_sorted['delta'] = abs(oat_sorted['kappa_score'] - baseline_kappa)
+    oat_sorted = oat_sorted.sort_values('delta', ascending=False)
+    for idx, row in oat_sorted.head(3).iterrows():
+        lines.append(f"   - {row['experiment']}: Δ = {row['delta']:.4f}")
 
-    # --------------------------
-    # Load best model and evaluate
-    # --------------------------
-    if best_model_state is not None:
-        model.load_state_dict(best_model_state)
-        logger.info("Loaded best model for final evaluation")
+    lines.append("\n3. Model Selection:")
+    if len(full) > 0 and len(lightweight) > 0:
+        if full['kappa_score'].max() > lightweight['kappa_score'].max():
+            lines.append("   → Use Full model if compute budget allows")
+        else:
+            lines.append("   → Lightweight model is sufficient and more efficient")
 
-    # Evaluation on test set with memory management
-    logger.info("Starting final evaluation on test set...")
-    model.eval()
-    test_loss = 0.0
-    all_test_outputs = []
-    all_test_targets = []
+    lines.append("\n4. Figures for Thesis:")
+    lines.append("   - Figure 1: One-at-a-time parameter sensitivity")
+    lines.append("   - Figure 2: Model type comparison")
+    lines.append("   - Figure 3: Batch size comparison")
+    lines.append("   - Figure 4: Interaction effects")
+    lines.append("   - Figure 5: Overall performance ranking")
+    lines.append("   - Table 1: Summary statistics by category")
+    lines.append("   - Table 2: Top configurations")
 
-    with torch.no_grad():
-        for batch_idx, (xb, yb) in enumerate(test_loader):
-            xb, yb = xb.to(device), yb.to(device)
-            outputs = model(xb)
-            loss = criterion(outputs, yb)
-            test_loss += loss.item() * xb.size(0)
-            all_test_outputs.append(outputs.cpu())  # Move to CPU
-            all_test_targets.append(yb.cpu())
+    lines.append("\n" + "=" * 80)
+    lines.append("END OF REPORT")
+    lines.append("=" * 80)
 
-            # Memory cleanup during test evaluation
-            if batch_idx % 20 == 0 and device == 'cuda':
-                torch.cuda.empty_cache()
+    # Save report
+    report_path = os.path.join(results_dir, 'final_report.txt')
+    with open(report_path, 'w') as f:
+        f.write('\n'.join(lines))
 
-    all_test_outputs = torch.cat(all_test_outputs).to(device)
-    all_test_targets = torch.cat(all_test_targets).to(device)
-    test_acc, per_class_test_acc, test_confidence = calculate_metrics(all_test_outputs, all_test_targets)
-    test_loss /= test_size
+    print(f"\n✓ Saved: final_report.txt")
 
-    # Compute Cohen's Kappa
-    all_preds = all_test_outputs.argmax(dim=1).cpu().numpy().astype(int)
-    y_true = all_test_targets.cpu().numpy().astype(int)
+    # Also print to console
+    print("\n" + "\n".join(lines))
 
-    po = np.mean(all_preds == y_true)
 
-    # Force both vectors to length = num_classes
-    true_counts = np.bincount(y_true, minlength=num_classes)
-    pred_counts = np.bincount(all_preds, minlength=num_classes)
+# =============================================
+# MAIN
+# =============================================
 
-    pe = np.sum(true_counts * pred_counts) / (len(y_true) ** 2)
-    kappa_score = (po - pe) / (1 - pe) if pe < 1 else 0.0
+if __name__ == "__main__":
+    import argparse
 
-    logger.info("=== FINAL SESSION-BASED RESULTS (COSINE CLASSIFIER) ===")
-    logger.info(f"Test Loss: {test_loss:.4f}")
-    logger.info(f"Test Accuracy: {test_acc:.4f}")
-    logger.info(f"Cohen's Kappa: {kappa_score:.4f}")
-    logger.info(f"Test Confidence: {test_confidence:.3f}")
-    logger.info(f"Per-class Test Acc: {[f'{acc:.3f}' for acc in per_class_test_acc]}")
-    logger.info(f"Users tested: {len(user_ids)} (S{user_ids[0]:03d} to S{user_ids[-1]:03d})")
+    parser = argparse.ArgumentParser(
+        description='Run efficient ablation study',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+This ablation study uses an efficient fractional factorial design to test
+~23 experiments instead of 162 full grid search combinations.
 
-    # Log final memory usage
-    final_memory = get_memory_usage()
-    logger.info(f"Final memory usage: {final_memory:.2f} GB")
+Experiment groups:
+  - Baseline with recommended defaults (1)
+  - One-at-a-time parameter variations (11)
+  - Critical parameter interactions (6)
+  - Extreme configurations (3)
 
-    # Save final results
-    if save_model_checkpoints:
-        final_results = {
-            'test_accuracy': float(test_acc),
-            'test_loss': float(test_loss),
-            'kappa_score': float(kappa_score),
-            'best_val_acc': float(best_val_acc),
-            'test_confidence': float(test_confidence),
-            'per_class_test_acc': [float(acc) for acc in per_class_test_acc],
-            'training_completed': True,
-            'total_epochs': epoch + 1,
-            'total_training_time': float(total_training_time),
-            'num_users': len(user_ids),
-            'user_ids': user_ids,
-            'normalization_method': normalization_method,
-            'model_type': model_type,
-            'use_augmentation': use_augmentation,
-            'early_stopped': epochs_without_improvement >= early_stopping_patience,
-            'final_lr': float(current_lr),
-            'max_cache_size': max_cache_size,
-            'memory_efficient': True,
-            'split_method': 'session_based',
-            'data_leakage_prevented': True,
-            'use_cosine_classifier': use_cosine_classifier,
-            'cosine_scale': cosine_scale,
-            'label_smoothing': label_smoothing,
-            'warmup_epochs': warmup_epochs
-        }
-        results_file = os.path.join(run_checkpoint_dir, 'final_results.json')
-        with open(results_file, 'w') as f:
-            json.dump(final_results, f, indent=2)
+All experiments use cosine classifier, label smoothing, and warmup to prevent collapse.
 
-        logger.info(f"Session-based 2D Training completed. All files saved to: {run_checkpoint_dir}")
+Example usage:
+  python ablation_experiment.py
 
-    # --------------------------
-    # Confusion Matrices (Train + Test)
-    # --------------------------
-    logger.info("Generating confusion matrices...")
-
-    # --- Training confusion matrix ---
-    all_train_preds, all_train_labels = [], []
-    model.eval()
-    with torch.no_grad():
-        for inputs, labels in train_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            outputs = model(inputs)
-            _, preds = torch.max(outputs, 1)
-            all_train_preds.extend(preds.cpu().tolist())
-            all_train_labels.extend(labels.cpu().tolist())
-
-    train_cm_path = os.path.join(run_checkpoint_dir, "train_confusion_matrix.png")
-    save_confusion_matrix_torch(
-        all_train_labels,
-        all_train_preds,
-        num_classes=num_classes,
-        save_path=train_cm_path,
-        class_names=[f"S{uid:03d}" for uid in user_ids]
+Output:
+  - 5 publication-ready figures (PNG + PDF)
+  - 2 LaTeX-ready tables (CSV + TEX)
+  - Comprehensive text report
+  - Complete results CSV for further analysis
+        """
     )
-    logger.info(f"Saved training confusion matrix to {train_cm_path}")
 
-    # --- Test confusion matrix ---
-    all_test_preds, all_test_labels = [], []
-    with torch.no_grad():
-        for inputs, labels in test_loader:
-            inputs, labels = inputs.to(device), labels.to(device)
-            outputs = model(inputs)
-            _, preds = torch.max(outputs, 1)
-            all_test_preds.extend(preds.cpu().tolist())
-            all_test_labels.extend(labels.cpu().tolist())
+    parser.add_argument('--data-path', type=str, default=None,
+                        help='Override DATA_PATH in script')
+    parser.add_argument('--model-path', type=str, default=None,
+                        help='Override MODEL_PATH in script')
+    parser.add_argument('--users', type=int, default=30,
+                        help='Number of users to test (default: 30)')
+    parser.add_argument('--epochs', type=int, default=50,
+                        help='Training epochs per experiment (default: 50)')
 
-    test_cm_path = os.path.join(run_checkpoint_dir, "test_confusion_matrix.png")
-    save_confusion_matrix_torch(
-        all_test_labels,
-        all_test_preds,
-        num_classes=num_classes,
-        save_path=test_cm_path,
-        class_names=[f"S{uid:03d}" for uid in user_ids]
-    )
-    logger.info(f"Saved test confusion matrix to {test_cm_path}")
+    args = parser.parse_args()
 
-    # Final cleanup
-    del all_test_outputs, all_test_targets
-    if device == 'cuda':
-        torch.cuda.empty_cache()
-    gc.collect()
+    # Override paths if provided
+    if args.data_path:
+        DATA_PATH = args.data_path
+        COMMON_PARAMS['data_path'] = DATA_PATH
 
-    return test_acc, kappa_score
+    if args.model_path:
+        MODEL_PATH = args.model_path
+        COMMON_PARAMS['model_path'] = MODEL_PATH
+
+    if args.users:
+        USER_IDS = list(range(1, args.users + 1))
+        COMMON_PARAMS['user_ids'] = USER_IDS
+
+    if args.epochs:
+        COMMON_PARAMS['epochs'] = args.epochs
+
+    # Verify paths are set
+    if DATA_PATH == "path/to/your/data" or MODEL_PATH == "path/to/models/efficient_ablation":
+        print("\n⚠️  WARNING: Please update DATA_PATH and MODEL_PATH in the script!")
+        print("You can also use --data-path and --model-path arguments.\n")
+        response = input("Continue anyway? (y/n): ")
+        if response.lower() != 'y':
+            print("Exiting.")
+            exit(0)
+
+    print("\n" + "=" * 80)
+    print("EFFICIENT ABLATION STUDY")
+    print("=" * 80)
+    print(f"\nConfiguration:")
+    print(f"  Data path: {DATA_PATH}")
+    print(f"  Model path: {MODEL_PATH}")
+    print(f"  Users: {len(USER_IDS)} (S{USER_IDS[0]:03d} to S{USER_IDS[-1]:03d})")
+    print(f"  Epochs per experiment: {COMMON_PARAMS['epochs']}")
+    print(f"\nEstimated experiments: ~23")
+    print(f"Estimated time: ~{23 * COMMON_PARAMS['epochs'] * 2 / 60:.1f} hours")
+    print("  (assuming ~2 minutes per epoch)")
+    print("=" * 80)
+
+    response = input("\nProceed with ablation study? (y/n): ")
+    if response.lower() != 'y':
+        print("Exiting.")
+        exit(0)
+
+    print("\n🚀 Starting efficient ablation study...")
+    results = run_efficient_ablation_study()
+
+    print("\n" + "=" * 80)
+    print("✅ ABLATION STUDY COMPLETE!")
+    print("=" * 80)
+    print("\n📊 Results summary:")
+    print(f"  Total experiments: {len(results)}")
+    print(f"  Successful: {len(results[~results['collapsed']])}")
+    print(f"  Best Kappa: {results['kappa_score'].max():.4f}")
+    print(f"  Best Accuracy: {results['test_accuracy'].max():.4f}")
+
+    best = results.nlargest(1, 'kappa_score').iloc[0]
+    print(f"\n🏆 Best configuration: {best['experiment']}")
+    print(f"  Kappa: {best['kappa_score']:.4f}")
+    print(f"  Accuracy: {best['test_accuracy']:.4f}")
+    print(f"  Model: {best['model_type']}")
+    print(f"  Batch size: {best['batch_size']}")
+    print(f"  Learning rate: {best['lr']}")
+    print(f"  Cosine scale: {best['cosine_scale']}")
+    print(f"  Label smoothing: {best['label_smoothing']}")
+    print(f"  Warmup epochs: {best['warmup_epochs']}")
+
+    print("\n📁 Output files:")
+    print("  - all_results.csv: Complete dataset")
+    print("  - fig1_oat_analysis.png/pdf: Parameter sensitivity")
+    print("  - fig2_model_comparison.png/pdf: Model type effects")
+    print("  - fig3_batch_comparison.png/pdf: Batch size effects")
+    print("  - fig4_interactions.png/pdf: Parameter interactions")
+    print("  - fig5_overall_ranking.png/pdf: Performance ranking")
+    print("  - table1_summary.csv/.tex: Summary statistics")
+    print("  - table2_top_configs.csv/.tex: Top configurations")
+    print("  - final_report.txt: Comprehensive text report")
+
+    print("\n💡 Next steps:")
+    print("  1. Review final_report.txt for key findings")
+    print("  2. Use the best configuration for final experiments")
+    print("  3. Include figures and tables in your thesis")
+    print("  4. Cite the optimal hyperparameters in your methodology section")
