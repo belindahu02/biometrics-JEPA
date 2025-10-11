@@ -9,7 +9,6 @@ import gc
 from backbones import *
 from data_loader import *
 
-
 def compute_cohen_kappa(y_true, y_pred, num_classes):
     """
     Compute Cohen's Kappa score manually.

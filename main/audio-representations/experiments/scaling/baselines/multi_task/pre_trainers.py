@@ -9,6 +9,14 @@ import gc
 from backbones import *
 from data_loader import *
 
+base_dir = "/app/data/experiments/scaling/baselines"
+
+# Make sure these exist
+graph_data_dir = os.path.join(base_dir, "multi_task/graph_data")
+graphs_dir = os.path.join(base_dir, "multi_task/graphs")
+
+os.makedirs(graph_data_dir, exist_ok=True)
+os.makedirs(graphs_dir, exist_ok=True)
 
 class AugmentedDataSequence(tf.keras.utils.Sequence):
     """
@@ -265,7 +273,7 @@ def pre_trainer(scen):
     plt.xlabel('First Principal Component')
     plt.ylabel('Second Principal Component')
     plt.colorbar(label='User ID')
-    plt.savefig('graphs/latentspace_scen_' + str(scen) + '.png', dpi=150)
+    plt.savefig(os.path.join(graphs_dir, 'latentspace_scen_' + str(scen) + '.png'), dpi=150, bbox_inches='tight')
     plt.close(fig4)
 
     # Clean up

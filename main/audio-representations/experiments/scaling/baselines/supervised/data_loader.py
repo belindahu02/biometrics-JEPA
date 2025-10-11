@@ -3,159 +3,292 @@ import numpy as np
 import os
 import mne
 import gc
+from tensorflow.keras.utils import Sequence
 
 
-def data_load_eeg(path, users, frame_size=30):
+class StreamingEEGDataGenerator(Sequence):
     """
-    Load EEG data from EDF files with session-level splitting to prevent data leakage.
-    Sessions 1-10: training, Sessions 11-12: validation, Sessions 13-14: testing
-
-    Memory-optimized version: processes data in smaller chunks
+    Memory-efficient data generator that loads EEG data on-demand from disk.
+    Only keeps one batch in memory at a time.
     """
-    x_train = []
-    x_val = []
-    x_test = []
-    y_train = []
-    y_val = []
-    y_test = []
-    sessions = []
 
-    for user_id, user in enumerate(users):
+    def __init__(self, path, users, split='train', frame_size=30, batch_size=8,
+                 shuffle=True, normalization_stats=None):
+        """
+        Args:
+            path: Base path to dataset
+            users: List of user IDs to include
+            split: 'train', 'val', or 'test'
+            frame_size: Window size for segmentation
+            batch_size: Batch size for training
+            shuffle: Whether to shuffle data
+            normalization_stats: Dict with 'mean' and 'std' for normalization
+        """
+        self.path = path
+        self.users = users
+        self.split = split
+        self.frame_size = frame_size
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.normalization_stats = normalization_stats
+
+        # Define session ranges for each split
+        if split == 'train':
+            self.sessions = list(range(1, 11))  # Sessions 1-10
+        elif split == 'val':
+            self.sessions = list(range(11, 13))  # Sessions 11-12
+        elif split == 'test':
+            self.sessions = list(range(13, 15))  # Sessions 13-14
+        else:
+            raise ValueError(f"Invalid split: {split}")
+
+        # Build index of all available samples
+        self._build_index()
+
+        # Initialize sample order
+        self.indices = np.arange(len(self.sample_index))
+        if self.shuffle:
+            np.random.shuffle(self.indices)
+
+    def _build_index(self):
+        """
+        Build an index of all samples without loading the actual data.
+        Each entry contains: (user_id, user_folder, session, window_idx, total_windows)
+        """
+        self.sample_index = []
+
+        print(f"Building index for {self.split} split...")
+
+        for user_id, user in enumerate(self.users):
+            user_folder = f"S{user:03d}"
+            user_path = os.path.join(self.path, user_folder)
+
+            if not os.path.exists(user_path):
+                continue
+
+            for session in self.sessions:
+                filename = f"S{user:03d}R{session:02d}.edf"
+                filepath = os.path.join(user_path, filename)
+
+                if not os.path.exists(filepath):
+                    continue
+
+                try:
+                    # Quick read to get dimensions without loading full data
+                    raw = mne.io.read_raw_edf(filepath, preload=False, verbose=False)
+                    n_samples = raw.n_times
+                    raw.close()
+                    del raw
+
+                    # Calculate number of windows
+                    if n_samples < self.frame_size:
+                        continue
+
+                    n_samples_truncated = (n_samples // self.frame_size) * self.frame_size
+                    # 50% overlap
+                    n_windows = (n_samples_truncated - self.frame_size) // (self.frame_size // 2) + 1
+
+                    # Add each window to the index
+                    for window_idx in range(n_windows):
+                        self.sample_index.append({
+                            'user_id': user_id,
+                            'user': user,
+                            'user_folder': user_folder,
+                            'session': session,
+                            'window_idx': window_idx,
+                            'filepath': filepath
+                        })
+
+                except Exception as e:
+                    continue
+
+        print(f"{self.split} split: {len(self.sample_index)} samples indexed")
+
+        if len(self.sample_index) == 0:
+            raise ValueError(f"No samples found for {self.split} split!")
+
+    def _load_window(self, sample_info):
+        """
+        Load a single window from an EDF file.
+        """
+        filepath = sample_info['filepath']
+        window_idx = sample_info['window_idx']
+
+        # Load the full session (cached by MNE if same file)
+        raw = mne.io.read_raw_edf(filepath, preload=True, verbose=False)
+        data = raw.get_data().T  # Shape: (n_samples, n_channels)
+
+        # Clean up
+        raw.close()
+        del raw
+
+        # Truncate to multiple of frame_size
+        data = data[:(data.shape[0] // self.frame_size) * self.frame_size]
+
+        # Extract the specific window with 50% overlap
+        stride = self.frame_size // 2
+        start_idx = window_idx * stride
+        end_idx = start_idx + self.frame_size
+
+        window = data[start_idx:end_idx, :].astype(np.float32)
+
+        del data
+
+        # Apply normalization if available
+        if self.normalization_stats is not None:
+            mean = self.normalization_stats['mean']
+            std = self.normalization_stats['std']
+            window = (window - mean) / std
+
+        return window
+
+    def __len__(self):
+        """Number of batches per epoch"""
+        return int(np.ceil(len(self.sample_index) / self.batch_size))
+
+    def __getitem__(self, idx):
+        """
+        Generate one batch of data by loading from disk on-demand.
+        """
+        # Get batch indices
+        batch_indices = self.indices[idx * self.batch_size:(idx + 1) * self.batch_size]
+
+        # Load windows for this batch
+        batch_X = []
+        batch_y = []
+
+        # Group by file to minimize file I/O
+        file_groups = {}
+        for i in batch_indices:
+            sample_info = self.sample_index[i]
+            filepath = sample_info['filepath']
+            if filepath not in file_groups:
+                file_groups[filepath] = []
+            file_groups[filepath].append(sample_info)
+
+        # Load all windows from each file
+        for filepath, samples in file_groups.items():
+            # Load file once
+            raw = mne.io.read_raw_edf(filepath, preload=True, verbose=False)
+            data = raw.get_data().T.astype(np.float32)
+            raw.close()
+            del raw
+
+            # Truncate
+            data = data[:(data.shape[0] // self.frame_size) * self.frame_size]
+
+            # Extract windows
+            for sample_info in samples:
+                window_idx = sample_info['window_idx']
+                stride = self.frame_size // 2
+                start_idx = window_idx * stride
+                end_idx = start_idx + self.frame_size
+
+                window = data[start_idx:end_idx, :]
+
+                # Apply normalization
+                if self.normalization_stats is not None:
+                    mean = self.normalization_stats['mean']
+                    std = self.normalization_stats['std']
+                    window = (window - mean) / std
+
+                batch_X.append(window)
+                batch_y.append(sample_info['user_id'])
+
+            del data
+            gc.collect()
+
+        return np.array(batch_X, dtype=np.float32), np.array(batch_y, dtype=np.int32)
+
+    def on_epoch_end(self):
+        """Shuffle indices after each epoch"""
+        if self.shuffle:
+            np.random.shuffle(self.indices)
+
+    def get_num_classes(self):
+        """Get number of unique users"""
+        return len(self.users)
+
+
+def calculate_normalization_stats(path, users, frame_size=30, max_samples=10000):
+    """
+    Calculate mean and std from training data without loading everything into memory.
+    Uses random sampling from training sessions for efficiency.
+
+    Args:
+        path: Base path to dataset
+        users: List of user IDs
+        frame_size: Window size
+        max_samples: Maximum number of samples to use for statistics (for speed)
+
+    Returns:
+        dict with 'mean' and 'std' arrays
+    """
+    print("Calculating normalization statistics from training data...")
+
+    train_sessions = list(range(1, 11))  # Sessions 1-10 for training
+    samples_collected = 0
+    all_samples = []
+
+    for user in users:
+        if samples_collected >= max_samples:
+            break
+
         user_folder = f"S{user:03d}"
         user_path = os.path.join(path, user_folder)
-        count = 0
 
         if not os.path.exists(user_path):
-            print(f"Warning: User folder {user_folder} not found")
-            sessions.append(0)
             continue
 
-        # Process each session (R01 to R14)
-        for session in range(1, 15):
+        for session in train_sessions:
+            if samples_collected >= max_samples:
+                break
+
             filename = f"S{user:03d}R{session:02d}.edf"
             filepath = os.path.join(user_path, filename)
 
-            try:
-                # Load EDF file
-                raw = mne.io.read_raw_edf(filepath, preload=True, verbose=False)
-
-                # Get data from all EEG channels
-                data = raw.get_data().T  # Shape: (n_samples, n_channels)
-
-                # Clean up raw object immediately
-                del raw
-                gc.collect()
-
-                # Create overlapping windows
-                if data.shape[0] < frame_size:
-                    continue
-
-                # Truncate to multiple of frame_size for consistent windowing
-                data = data[:(data.shape[0] // frame_size) * frame_size]
-
-                # Create sliding windows with 50% overlap
-                windowed_data = np.lib.stride_tricks.sliding_window_view(
-                    data, (frame_size, data.shape[1])
-                )[::frame_size // 2, :]
-                windowed_data = windowed_data.reshape(
-                    windowed_data.shape[0], windowed_data.shape[2], windowed_data.shape[3]
-                )
-
-                # Clean up intermediate data
-                del data
-
-                # Convert to float32 to save memory (default is float64)
-                windowed_data = windowed_data.astype(np.float32)
-
-                # Session-level split to prevent data leakage
-                if session <= 10:  # Training sessions
-                    x_train.append(windowed_data)
-                    y_train.extend([user_id] * windowed_data.shape[0])
-                elif session <= 12:  # Validation sessions
-                    x_val.append(windowed_data)
-                    y_val.extend([user_id] * windowed_data.shape[0])
-                else:  # Testing sessions (13-14)
-                    x_test.append(windowed_data)
-                    y_test.extend([user_id] * windowed_data.shape[0])
-
-                count += 1
-
-            except (FileNotFoundError, ValueError, RuntimeError) as e:
+            if not os.path.exists(filepath):
                 continue
 
-        sessions.append(count)
+            try:
+                # Load file
+                raw = mne.io.read_raw_edf(filepath, preload=True, verbose=False)
+                data = raw.get_data().T.astype(np.float32)
+                raw.close()
+                del raw
 
-        # Periodic garbage collection
-        if (user_id + 1) % 10 == 0:
-            gc.collect()
+                # Take random samples
+                if data.shape[0] >= frame_size:
+                    # Randomly sample a few windows from this file
+                    data = data[:(data.shape[0] // frame_size) * frame_size]
+                    num_windows = min(5, data.shape[0] // frame_size)  # Max 5 windows per file
 
-    # Concatenate all data
-    if x_train:
-        x_train = np.concatenate(x_train, axis=0).astype(np.float32)
-    else:
-        x_train = np.array([]).astype(np.float32)
+                    for _ in range(num_windows):
+                        if samples_collected >= max_samples:
+                            break
+                        start_idx = np.random.randint(0, data.shape[0] - frame_size + 1)
+                        window = data[start_idx:start_idx + frame_size, :]
+                        all_samples.append(window.reshape(-1, window.shape[-1]))
+                        samples_collected += window.shape[0]
 
-    if x_val:
-        x_val = np.concatenate(x_val, axis=0).astype(np.float32)
-    else:
-        x_val = np.array([]).astype(np.float32)
+                del data
+                gc.collect()
 
-    if x_test:
-        x_test = np.concatenate(x_test, axis=0).astype(np.float32)
-    else:
-        x_test = np.array([]).astype(np.float32)
+            except Exception as e:
+                continue
 
-    print(f"Training samples: {len(y_train)}")
-    print(f"Validation samples: {len(y_val)}")
-    print(f"Testing samples: {len(y_test)}")
+    if len(all_samples) == 0:
+        raise ValueError("No samples found for normalization!")
 
-    return x_train, np.array(y_train), x_val, np.array(y_val), x_test, np.array(y_test), sessions
-
-
-def norma(x_train, x_val, x_test):
-    """
-    Normalize data using mean and standard deviation from training data only.
-    Memory-optimized version using float32.
-    """
-    # Ensure float32 type
-    x_train = x_train.astype(np.float32)
-    x_val = x_val.astype(np.float32)
-    x_test = x_test.astype(np.float32)
-
-    # Reshape for normalization
-    original_train_shape = x_train.shape
-    original_val_shape = x_val.shape
-    original_test_shape = x_test.shape
-
-    x_train_flat = np.reshape(x_train, (x_train.shape[0] * x_train.shape[1], x_train.shape[2]))
-
-    # Calculate mean and std from training data only
-    mean = np.mean(x_train_flat, axis=0, dtype=np.float32)
-    std = np.std(x_train_flat, axis=0, dtype=np.float32)
-
-    # Avoid division by zero
+    # Concatenate and calculate statistics
+    all_samples = np.concatenate(all_samples, axis=0)
+    mean = np.mean(all_samples, axis=0, dtype=np.float32)
+    std = np.std(all_samples, axis=0, dtype=np.float32)
     std[std == 0] = 1.0
 
-    # Normalize training data
-    x_train_flat = (x_train_flat - mean) / std
-    x_train = np.reshape(x_train_flat, original_train_shape)
-    del x_train_flat
+    del all_samples
     gc.collect()
 
-    # Transform validation data
-    if x_val.size > 0:
-        x_val_flat = np.reshape(x_val, (x_val.shape[0] * x_val.shape[1], x_val.shape[2]))
-        x_val_flat = (x_val_flat - mean) / std
-        x_val = np.reshape(x_val_flat, original_val_shape)
-        del x_val_flat
-        gc.collect()
+    print(f"Normalization stats calculated from {samples_collected} samples")
 
-    # Transform test data
-    if x_test.size > 0:
-        x_test_flat = np.reshape(x_test, (x_test.shape[0] * x_test.shape[1], x_test.shape[2]))
-        x_test_flat = (x_test_flat - mean) / std
-        x_test = np.reshape(x_test_flat, original_test_shape)
-        del x_test_flat
-        gc.collect()
-
-    return x_train, x_val, x_test
+    return {'mean': mean, 'std': std}

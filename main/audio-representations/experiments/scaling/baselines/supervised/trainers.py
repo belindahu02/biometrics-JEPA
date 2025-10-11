@@ -1,11 +1,11 @@
 import tensorflow as tf
 from tensorflow.keras import Input, Model
-from tensorflow.keras.layers import Dense, Flatten, Conv1D, BatchNormalization, ReLU, Dropout
+from tensorflow.keras.layers import Dense, Flatten, Conv1D, BatchNormalization, ReLU, Dropout, MaxPooling1D
 import gc
 import numpy as np
 
 from backbones import *
-from data_loader import *
+from data_loader import StreamingEEGDataGenerator, calculate_normalization_stats
 
 
 def cohen_kappa(y_true, y_pred, num_classes):
@@ -44,39 +44,49 @@ def cohen_kappa(y_true, y_pred, num_classes):
     return kappa
 
 
-class MemoryEfficientDataGenerator(tf.keras.utils.Sequence):
+def evaluate_with_streaming_generator(model, generator, num_classes):
     """
-    Memory-efficient data generator that keeps data on disk and loads batches on demand.
-    This is crucial for handling 109 users without loading all data into RAM.
+    Evaluate model using streaming generator and calculate metrics.
     """
+    print(f"Evaluating on {len(generator.sample_index)} samples...")
 
-    def __init__(self, X, y, batch_size=8, shuffle=True):
-        self.X = X
-        self.y = y
-        self.batch_size = batch_size
-        self.shuffle = shuffle
-        self.indices = np.arange(len(self.y))
-        if self.shuffle:
-            np.random.shuffle(self.indices)
+    # Evaluate accuracy
+    results = model.evaluate(generator, verbose=0)
+    test_acc = results[1]
+    print(f"Test accuracy: {test_acc:.4f}")
 
-    def __len__(self):
-        return int(np.ceil(len(self.y) / self.batch_size))
+    # Calculate Kappa with streaming predictions
+    print("Calculating Kappa score...")
+    y_true_all = []
+    y_pred_all = []
 
-    def __getitem__(self, idx):
-        batch_indices = self.indices[idx * self.batch_size:(idx + 1) * self.batch_size]
-        batch_X = self.X[batch_indices]
-        batch_y = self.y[batch_indices]
-        return batch_X, batch_y
+    for i in range(len(generator)):
+        X_batch, y_batch = generator[i]
+        y_pred_batch = model.predict(X_batch, batch_size=len(X_batch), verbose=0)
 
-    def on_epoch_end(self):
-        if self.shuffle:
-            np.random.shuffle(self.indices)
+        y_true_all.extend(y_batch)
+        y_pred_all.append(y_pred_batch)
+
+        if (i + 1) % 100 == 0:
+            print(f"  Processed {i + 1}/{len(generator)} batches")
+            gc.collect()
+
+    y_true_all = np.array(y_true_all)
+    y_pred_all = np.concatenate(y_pred_all, axis=0)
+
+    kappa_score = cohen_kappa(y_true_all, y_pred_all, num_classes)
+    print(f'Kappa score: {kappa_score:.4f}')
+
+    del y_true_all, y_pred_all
+    gc.collect()
+
+    return test_acc, kappa_score
 
 
 def trainer(num_users):
     """
-    Train model on specified number of users using all available samples.
-    Memory-optimized for handling up to 109 users.
+    Train model on specified number of users using streaming data loader.
+    This version never loads all data into memory at once.
 
     Args:
         num_users: Number of users to include in the classification task
@@ -86,40 +96,73 @@ def trainer(num_users):
         kappa_score: Cohen's Kappa score
     """
     frame_size = 40
-    path = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/mmi/dataset/physionet.org/files/eegmmidb/1.0.0"
-    # path = "/app/data/1.0.0"
+    # path = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/mmi/dataset/physionet.org/files/eegmmidb/1.0.0"
+    path = "/app/data/1.0.0"
 
-    # Fixed batch size
     BATCH_SIZE = 8
 
     # Use first num_users from the dataset
     users = list(range(1, num_users + 1))
+    num_classes = num_users
 
-    # Load data
-    x_train, y_train, x_val, y_val, x_test, y_test, sessions = data_load_eeg(
-        path, users=users, frame_size=frame_size
+    print(f"\n{'=' * 60}")
+    print(f"Training with {num_users} users (streaming mode)")
+    print(f"{'=' * 60}\n")
+
+    # Step 1: Calculate normalization statistics from training data
+    normalization_stats = calculate_normalization_stats(
+        path, users, frame_size=frame_size, max_samples=10000
     )
 
-    print(f"Training with {num_users} users")
-    print(f"Training samples: {x_train.shape[0]}")
-    print(f"Validation samples: {x_val.shape[0]}")
-    print(f"Testing samples: {x_test.shape[0]}")
+    # Step 2: Create streaming data generators
+    print("\nCreating data generators...")
 
-    classes, counts = np.unique(y_train, return_counts=True)
-    num_classes = len(classes)
-    print(f"Number of classes: {num_classes}")
-    print(f"Samples per user: min={counts.min()}, max={counts.max()}, mean={counts.mean():.1f}")
+    train_generator = StreamingEEGDataGenerator(
+        path=path,
+        users=users,
+        split='train',
+        frame_size=frame_size,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        normalization_stats=normalization_stats
+    )
 
-    # Normalize data
-    x_train, x_val, x_test = norma(x_train, x_val, x_test)
-    print("x_train", x_train.shape)
-    print("x_val", x_val.shape)
-    print("x_test", x_test.shape)
+    val_generator = StreamingEEGDataGenerator(
+        path=path,
+        users=users,
+        split='val',
+        frame_size=frame_size,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        normalization_stats=normalization_stats
+    )
 
-    # Build model with consistent architecture
+    test_generator = StreamingEEGDataGenerator(
+        path=path,
+        users=users,
+        split='test',
+        frame_size=frame_size,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        normalization_stats=normalization_stats
+    )
+
+    print(f"\nDataset summary:")
+    print(f"  Training samples: {len(train_generator.sample_index)}")
+    print(f"  Validation samples: {len(val_generator.sample_index)}")
+    print(f"  Testing samples: {len(test_generator.sample_index)}")
+    print(f"  Number of classes: {num_classes}")
+    print(f"  Batch size: {BATCH_SIZE}")
+
+    # Get number of channels from first batch
+    sample_batch, _ = train_generator[0]
+    n_channels = sample_batch.shape[-1]
+    print(f"  Number of channels: {n_channels}")
+
+    # Step 3: Build model
     ks = 3
     con = 3
-    inputs = Input(shape=(frame_size, x_train.shape[-1]))
+    inputs = Input(shape=(frame_size, n_channels))
     x = Conv1D(filters=16 * con, kernel_size=ks, strides=1, padding='same')(inputs)
     x = BatchNormalization()(x)
     x = ReLU()(x)
@@ -130,15 +173,14 @@ def trainer(num_users):
     x = Dense(256, activation='relu')(x)
     x = Dense(64, activation='relu')(x)
     outputs = Dense(num_classes, activation='softmax')(x)
-    resnettssd = Model(inputs, outputs)
+    model = Model(inputs, outputs)
 
-    print(f"Using batch size: {BATCH_SIZE}")
-
-    # Training configuration
+    # Step 4: Configure training
     callback = tf.keras.callbacks.EarlyStopping(
         monitor='val_accuracy',
         restore_best_weights=True,
-        patience=5
+        patience=5,
+        verbose=1
     )
 
     lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
@@ -148,80 +190,46 @@ def trainer(num_users):
     )
     optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
 
-    # **CRITICAL MEMORY OPTIMIZATION**: Use mixed precision training
-    # This can reduce memory usage by ~40% with minimal accuracy impact
+    # Enable mixed precision for large-scale experiments
     if num_users > 50:
-        print("Enabling mixed precision training for memory efficiency")
+        print("Enabling mixed precision training")
         tf.keras.mixed_precision.set_global_policy('mixed_float16')
-        # Recompile with mixed precision
         optimizer = tf.keras.mixed_precision.LossScaleOptimizer(optimizer)
 
-    resnettssd.compile(
+    model.compile(
         optimizer=optimizer,
         loss='sparse_categorical_crossentropy',
         metrics=['accuracy']
     )
 
-    # **MEMORY OPTIMIZATION**: Use data generators for large datasets
-    # This prevents loading full batches into memory at once
-    use_generator = (num_users > 70)
+    # Step 5: Train model
+    print("\nStarting training...")
+    history = model.fit(
+        train_generator,
+        validation_data=val_generator,
+        epochs=100,
+        callbacks=[callback],
+        verbose=1,
+    )
 
-    if use_generator:
-        print("Using data generator for memory efficiency")
-        train_gen = MemoryEfficientDataGenerator(x_train, y_train, batch_size=BATCH_SIZE, shuffle=True)
-        val_gen = MemoryEfficientDataGenerator(x_val, y_val, batch_size=BATCH_SIZE, shuffle=False)
+    # Step 6: Evaluate
+    print("\nEvaluating model...")
+    test_acc, kappa_score = evaluate_with_streaming_generator(
+        model, test_generator, num_classes
+    )
 
-        history = resnettssd.fit(
-            train_gen,
-            validation_data=val_gen,
-            epochs=100,
-            callbacks=[callback],
-            verbose=1
-        )
-    else:
-        history = resnettssd.fit(
-            x_train, y_train,
-            validation_data=(x_val, y_val),
-            epochs=100,
-            callbacks=[callback],
-            batch_size=BATCH_SIZE,
-            verbose=1
-        )
+    # Cleanup
+    del model, history, train_generator, val_generator, test_generator
+    del normalization_stats
 
-    # Evaluate on test set
-    results = resnettssd.evaluate(x_test, y_test, batch_size=BATCH_SIZE, verbose=0)
-    test_acc = results[1]
-    print(f"Test accuracy: {results[1]:.4f}")
-
-    # Calculate Cohen's Kappa score with batch prediction to save memory
-    print("Calculating Kappa score...")
-
-    # **MEMORY OPTIMIZATION**: Predict in smaller chunks and accumulate
-    y_pred_list = []
-    chunk_size = 1000  # Process 1000 samples at a time
-
-    for i in range(0, len(x_test), chunk_size):
-        chunk = x_test[i:i + chunk_size]
-        pred_chunk = resnettssd.predict(chunk, batch_size=BATCH_SIZE, verbose=0)
-        y_pred_list.append(pred_chunk)
-        del pred_chunk
-        gc.collect()
-
-    y_pred = np.concatenate(y_pred_list, axis=0)
-    del y_pred_list
-
-    kappa_score = cohen_kappa(y_test, y_pred, num_classes)
-    print(f'Kappa score: {kappa_score:.4f}')
-
-    # Clean up to free memory
-    del resnettssd, history, y_pred
-    del x_train, y_train, x_val, y_val, x_test, y_test
-
-    # Reset mixed precision policy if it was enabled
     if num_users > 50:
         tf.keras.mixed_precision.set_global_policy('float32')
 
     tf.keras.backend.clear_session()
     gc.collect()
+
+    print(f"\nFinal Results:")
+    print(f"  Test Accuracy: {test_acc:.4f}")
+    print(f"  Kappa Score: {kappa_score:.4f}")
 
     return test_acc, kappa_score

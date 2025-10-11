@@ -1,10 +1,11 @@
 from trainers import *
 import numpy as np
 import matplotlib.pyplot as plt
+import os
 
 # Base output directory on host
-base_dir = "test/"
-# base_dir = "/app/data/experiments/scaling/baselines"
+# base_dir = "test/"
+base_dir = "/app/data/experiments/scaling/baselines"
 
 # Make sure these exist
 graph_data_dir = os.path.join(base_dir, "supervised/graph_data")

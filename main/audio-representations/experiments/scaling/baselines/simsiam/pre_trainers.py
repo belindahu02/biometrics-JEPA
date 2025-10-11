@@ -167,9 +167,8 @@ def pre_trainer(scen, fet, base_dir="/app/data/experiments/scaling/baselines"):
     )
 
     # Model checkpoint to save during training
-    os.makedirs("checkpoints", exist_ok=True)
     checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
-        filepath=f"checkpoints/simsiam_pretrain_scen{scen}_epoch{{epoch:02d}}.weights.h5",
+        filepath=os.path.join(checkpoint_dir, f"simsiam_pretrain_scen{scen}_epoch{{epoch:02d}}.weights.h5"),
         save_weights_only=True,
         save_freq='epoch',
         verbose=0
@@ -240,8 +239,8 @@ def pre_trainer(scen, fet, base_dir="/app/data/experiments/scaling/baselines"):
         plt.ylabel('t-SNE Component 2', fontsize=12)
         plt.tight_layout()
 
-        os.makedirs("graphs", exist_ok=True)
-        plt.savefig('graphs/latentspace_scen_1.png', dpi=150, bbox_inches='tight')
+        latentspace_path = os.path.join(graphs_dir, 'latentspace_scen_1.png')
+        plt.savefig(latentspace_path, dpi=150, bbox_inches='tight')
         print("Latent space visualization saved: graphs/latentspace_scen_1.png")
         plt.close(fig4)
 
