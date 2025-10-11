@@ -5,44 +5,100 @@ from tensorflow.keras import Input, Model
 from tensorflow.keras.layers import Dense, Flatten
 from tensorflow.keras import layers
 import gc
-import os
 
 from backbones import *
 from data_loader import *
 
 
-def cohen_kappa_score(y_true, y_pred, num_classes):
+def compute_cohen_kappa(y_true, y_pred, num_classes):
     """
-  Manual implementation of Cohen's Kappa score
-  """
+    Compute Cohen's Kappa score manually.
+
+    Args:
+        y_true: True labels (1D array)
+        y_pred: Predicted class probabilities (2D array) or class indices (1D array)
+        num_classes: Number of classes
+
+    Returns:
+        Cohen's Kappa score
+    """
+    # Convert predictions to class indices if needed
+    if len(y_pred.shape) == 2:
+        y_pred_classes = np.argmax(y_pred, axis=1)
+    else:
+        y_pred_classes = y_pred
+
     # Create confusion matrix
-    confusion_matrix = np.zeros((num_classes, num_classes))
-    for true, pred in zip(y_true, y_pred):
+    confusion_matrix = np.zeros((num_classes, num_classes), dtype=np.int32)
+    for true, pred in zip(y_true, y_pred_classes):
         confusion_matrix[int(true), int(pred)] += 1
 
+    # Calculate observed agreement (accuracy)
     n = np.sum(confusion_matrix)
+    observed_agreement = np.trace(confusion_matrix) / n
 
-    # Observed agreement
-    po = np.trace(confusion_matrix) / n
+    # Calculate expected agreement
+    row_sums = np.sum(confusion_matrix, axis=1)
+    col_sums = np.sum(confusion_matrix, axis=0)
+    expected_agreement = np.sum(row_sums * col_sums) / (n * n)
 
-    # Expected agreement
-    row_sum = np.sum(confusion_matrix, axis=1)
-    col_sum = np.sum(confusion_matrix, axis=0)
-    pe = np.sum(row_sum * col_sum) / (n * n)
+    # Calculate Cohen's Kappa
+    if expected_agreement == 1.0:
+        return 1.0  # Perfect agreement
 
-    # Cohen's Kappa
-    if pe == 1:
-        return 1.0
-    kappa = (po - pe) / (1 - pe)
-
+    kappa = (observed_agreement - expected_agreement) / (1.0 - expected_agreement)
     return kappa
 
 
-def trainer(num_users, fet_extrct, scen, ft, checkpoint_dir="checkpoints"):
+class CachedGeneratorSequence(tf.keras.utils.Sequence):
+    """
+    Keras Sequence that caches batches from a generator for efficient training
+    """
+
+    def __init__(self, generator, batches_to_cache=None):
+        self.generator = generator
+        self.batches_to_cache = batches_to_cache
+        self.cached_batches = []
+        self.cache_data()
+
+    def cache_data(self):
+        """Cache batches from the generator"""
+        self.cached_batches = []
+        batch_count = 0
+
+        for batch_x, batch_y in self.generator:
+            self.cached_batches.append((batch_x, batch_y))
+            batch_count += 1
+
+            if self.batches_to_cache is not None and batch_count >= self.batches_to_cache:
+                break
+
+    def __len__(self):
+        return len(self.cached_batches)
+
+    def __getitem__(self, idx):
+        return self.cached_batches[idx]
+
+    def on_epoch_end(self):
+        """Re-cache data at the end of each epoch"""
+        self.cache_data()
+        gc.collect()
+
+
+def trainer(num_users, fet_extrct, scen, ft):
+    """
+    Train classifier with specified number of users using generators.
+
+    Args:
+        num_users: Number of users to include in classification task
+        fet_extrct: Pre-trained feature extractor
+        scen: Scenario number
+        ft: Fine-tuning configuration (0-5)
+    """
     ft_dict = {0: 17, 1: 12, 2: 11, 3: 8, 4: 5, 5: 0}
     ft = ft_dict[ft]
 
-    # Freeze layers
+    # Set feature extractor trainability
     for i in range(1, ft + 1):
         fet_extrct.layers[i].trainable = False
 
@@ -50,116 +106,105 @@ def trainer(num_users, fet_extrct, scen, ft, checkpoint_dir="checkpoints"):
     # path = "/app/data/1.0.0"
     path = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/mmi/dataset/physionet.org/files/eegmmidb/1.0.0"  # Update this path
 
-    # Use first num_users for the classification task
-    users = list(range(1, num_users + 1))
+    batch_size = 8  # Small batch size to manage memory
 
-    # Load data with session-level splitting
-    folder_train = ["TrainingSet"]
-    folder_val = ["TestingSet"]
-    folder_test = ["TestingSet_secret"]
+    # Select users based on num_users parameter
+    # users = list(range(1, num_users + 1))
+    users = list(range(1, 2))
 
-    print(f"\nLoading data for {num_users} users...")
+    print(f"\n{'=' * 60}")
+    print(f"Training with {num_users} users")
+    print(f"{'=' * 60}")
 
-    # Memory efficient: limit samples during loading if needed
-    max_samples_per_user = None  # Set to a number (e.g., 1000) if still hitting memory issues
+    # Create generators with proper normalization
+    train_gen, val_gen, test_gen, steps = data_load_with_generators(
+        path, users=users, frame_size=frame_size,
+        batch_size=batch_size,
+        max_samples_per_session=10000  # Limit to manage memory
+    )
 
-    x_train, y_train, sessions_train = data_load_origin(path, users=users, folders=folder_train,
-                                                        frame_size=frame_size,
-                                                        max_samples_per_user=max_samples_per_user)
-    print(f"Training samples: {x_train.shape[0]}")
+    print(f"Steps per epoch - Train: {steps['train']}, Val: {steps['val']}, Test: {steps['test']}")
 
-    x_val, y_val, sessions_val = data_load_origin(path, users=users, folders=folder_val,
-                                                  frame_size=frame_size, max_samples_per_user=max_samples_per_user)
-    print(f"Validation samples: {x_val.shape[0]}")
+    # Get data shape and number of classes from first batch
+    first_batch_x, first_batch_y = next(iter(train_gen))
+    n_channels = first_batch_x.shape[-1]
+    num_classes = len(np.unique(first_batch_y))
 
-    x_test, y_test, sessions_test = data_load_origin(path, users=users, folders=folder_test,
-                                                     frame_size=frame_size, max_samples_per_user=max_samples_per_user)
-    print(f"Testing samples: {x_test.shape[0]}")
-
-    if x_train.shape[0] == 0 or x_val.shape[0] == 0 or x_test.shape[0] == 0:
-        print(f"Warning: Insufficient data for {num_users} users")
-        return 0.0, 0.0
-
-    classes, counts = np.unique(y_train, return_counts=True)
-    num_classes = len(classes)
+    print(f"Data shape: (batch_size, {frame_size}, {n_channels})")
     print(f"Number of classes: {num_classes}")
-    print(f"Samples per class - min: {min(counts)}, max: {max(counts)}, mean: {np.mean(counts):.1f}")
 
-    # Normalize data
-    x_train, x_val, x_test = norma(x_train, x_val, x_test)
-    print(f"x_train: {x_train.shape}, x_val: {x_val.shape}, x_test: {x_test.shape}")
-
-    # Build classification model
-    inputs = Input(shape=(frame_size, x_train.shape[-1]))
+    # Build classifier on top of feature extractor
+    inputs = Input(shape=(frame_size, n_channels))
     x = fet_extrct(inputs, training=False)
     x = Dense(256, activation='relu')(x)
     x = Dense(64, activation='relu')(x)
     outputs = Dense(num_classes, activation='softmax')(x)
     resnettssd = Model(inputs, outputs)
 
-    # Callbacks
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    model_checkpoint_path = os.path.join(checkpoint_dir, f"model_users{num_users}_temp.weights.h5")
+    # Callbacks with memory management
+    class MemoryCallback(tf.keras.callbacks.Callback):
+        def on_epoch_end(self, epoch, logs=None):
+            if epoch % 5 == 0:
+                gc.collect()
 
-    checkpoint_callback = tf.keras.callbacks.ModelCheckpoint(
-        filepath=model_checkpoint_path,
-        monitor='val_accuracy',
-        save_best_only=True,
-        save_weights_only=True,
-        verbose=0
+    callback_early = tf.keras.callbacks.EarlyStopping(
+        monitor='val_accuracy', restore_best_weights=True, patience=5
     )
+    callback_memory = MemoryCallback()
 
-    early_stopping = tf.keras.callbacks.EarlyStopping(
-        monitor='val_accuracy',
-        restore_best_weights=True,
-        patience=5
-    )
-
-    # Learning rate schedule
     lr_schedule = tf.keras.optimizers.schedules.ExponentialDecay(
-        initial_learning_rate=0.001, decay_rate=0.95, decay_steps=1000
+        initial_learning_rate=0.001 / (ft + 1), decay_rate=0.95, decay_steps=1000
     )
     optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
-    resnettssd.compile(optimizer=optimizer, loss='sparse_categorical_crossentropy', metrics=['accuracy'])
+    resnettssd.compile(
+        optimizer=optimizer,
+        loss='sparse_categorical_crossentropy',
+        metrics=['accuracy']
+    )
 
-    # Train model
+    # Create Keras Sequences from generators
+    print("\nCaching training data...")
+    train_sequence = CachedGeneratorSequence(train_gen, batches_to_cache=steps['train'])
+
+    print("Caching validation data...")
+    val_sequence = CachedGeneratorSequence(val_gen, batches_to_cache=steps['val'])
+
+    print("Caching test data...")
+    test_sequence = CachedGeneratorSequence(test_gen, batches_to_cache=steps['test'])
+
+    print("\nStarting training...")
     history = resnettssd.fit(
-        x_train, y_train,
-        validation_data=(x_val, y_val),
+        train_sequence,
+        validation_data=val_sequence,
         epochs=100,
-        callbacks=[early_stopping, checkpoint_callback],
-        batch_size=8,
+        callbacks=[callback_early, callback_memory],
         verbose=1
     )
 
-    # Evaluate
-    results = resnettssd.evaluate(x_test, y_test, verbose=0)
-    test_acc = results[1]
+    # Evaluate on test set
+    print("\nEvaluating on test set...")
+    test_results = resnettssd.evaluate(test_sequence, verbose=1)
+    test_acc = test_results[1]
+
+    print(f"Test loss: {test_results[0]:.4f}")
     print(f"Test accuracy: {test_acc:.4f}")
 
-    # Calculate kappa score in batches to save memory
-    batch_size = 32
-    y_pred_all = []
+    # Calculate kappa score - collect all predictions
+    print("Computing predictions for Kappa score...")
+    all_y_pred = resnettssd.predict(test_sequence, verbose=1)
 
-    for i in range(0, len(x_test), batch_size):
-        batch = x_test[i:i + batch_size]
-        y_pred_batch = resnettssd.predict(batch, verbose=0)
-        y_pred_all.append(np.argmax(y_pred_batch, axis=1))
-        del y_pred_batch
-        gc.collect()
+    # Get true labels from test sequence
+    all_y_true = []
+    for i in range(len(test_sequence)):
+        _, y_batch = test_sequence[i]
+        all_y_true.extend(y_batch)
+    all_y_true = np.array(all_y_true)
 
-    y_pred_classes = np.concatenate(y_pred_all)
-    kappa_score = cohen_kappa_score(y_test, y_pred_classes, num_classes)
+    kappa_score = compute_cohen_kappa(all_y_true, all_y_pred, num_classes)
     print(f'Kappa score: {kappa_score:.4f}')
 
     # Clean up
-    del resnettssd, x_train, y_train, x_val, y_val, x_test, y_test
-    del y_pred_classes, y_pred_all
-    tf.keras.backend.clear_session()
+    del all_y_true, all_y_pred, train_sequence, val_sequence, test_sequence
     gc.collect()
-
-    # Remove temporary checkpoint
-    if os.path.exists(model_checkpoint_path):
-        os.remove(model_checkpoint_path)
 
     return test_acc, kappa_score

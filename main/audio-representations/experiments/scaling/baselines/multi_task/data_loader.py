@@ -31,26 +31,22 @@ def load_edf_file(filepath, max_samples=None):
         return None
 
 
-def data_load_origin(path, users, sessions, frame_size=30, max_samples_per_session=None):
+def compute_normalization_stats(path, users, sessions, frame_size=30, max_samples_per_session=None):
     """
-    Load data from EEG MMI dataset with session-level organization
+    Compute mean and std statistics from training data for normalization.
+    This does a single pass through the data to compute statistics.
 
-    Args:
-        path: Base path to dataset
-        users: List of user IDs
-        sessions: List of session numbers
-        frame_size: Window size for sliding windows
-        max_samples_per_session: Limit samples per session to reduce memory
+    Returns:
+        mean, std: Arrays of shape (n_channels,)
     """
-    x_train = []  # Use list instead of numpy array for memory efficiency
-    y_train = []
-    session_counts = []
+    print("Computing normalization statistics...")
 
-    total_sessions = len(users) * len(sessions)
-    loaded_sessions = 0
+    # Running statistics
+    n_samples = 0
+    sum_x = None
+    sum_x2 = None
 
-    for user_id, user in enumerate(users):
-        count = 0
+    for user in users:
         user_folder = f"S{user:03d}"
 
         for session in sessions:
@@ -62,249 +58,269 @@ def data_load_origin(path, users, sessions, frame_size=30, max_samples_per_sessi
                 if data is None or data.shape[0] < frame_size:
                     continue
 
-                # Truncate to multiple of frame_size for sliding window
+                # Truncate to multiple of frame_size
                 data = data[:(data.shape[0] // frame_size) * frame_size]
 
                 if data.shape[0] == 0:
                     continue
 
-                # Create sliding windows with 50% overlap
-                data = np.lib.stride_tricks.sliding_window_view(
-                    data, (frame_size, data.shape[1])
-                )[::frame_size // 2, :]
+                # Initialize arrays on first valid data
+                if sum_x is None:
+                    sum_x = np.zeros(data.shape[1])
+                    sum_x2 = np.zeros(data.shape[1])
 
-                # Reshape from (n_windows, 1, frame_size, n_channels) to (n_windows, frame_size, n_channels)
-                if len(data.shape) == 4:
-                    data = data.squeeze(axis=1)
-                elif len(data.shape) != 3:
-                    print(f"Warning: Unexpected data shape {data.shape} for {filepath}")
-                    continue
+                # Update running statistics
+                sum_x += np.sum(data, axis=0)
+                sum_x2 += np.sum(data ** 2, axis=0)
+                n_samples += data.shape[0]
 
-                # Append to list
-                x_train.append(data)
-                y_train.extend([user_id] * data.shape[0])
-
-                count += 1
-                loaded_sessions += 1
-
-                # Free memory
                 del data
+                gc.collect()
 
-                if loaded_sessions % 10 == 0:
-                    print(f"Loaded {loaded_sessions}/{total_sessions} sessions...")
-
-            except (FileNotFoundError, IndexError, Exception) as e:
+            except Exception as e:
                 print(f"Error loading {filepath}: {e}")
                 continue
 
-        session_counts.append(count)
+    # Compute mean and std
+    mean = sum_x / n_samples
+    std = np.sqrt(sum_x2 / n_samples - mean ** 2)
+    std = np.where(std == 0, 1, std)  # Avoid division by zero
 
-        # Force garbage collection after each user
-        gc.collect()
-
-    if len(x_train) == 0:
-        raise ValueError("No data was loaded! Check your dataset path and file structure.")
-
-    # Convert list to numpy array at the end
-    print("Concatenating data arrays...")
-    x_train = np.concatenate(x_train, axis=0)
-    y_train = np.array(y_train)
-
-    print(f"Loaded data shape: {x_train.shape}")
-    return x_train, y_train, session_counts
+    print(f"Computed stats from {n_samples} samples")
+    return mean, std
 
 
-def norma_origin(x_all):
-    """Normalize data using z-score normalization (mean=0, std=1)"""
-    if len(x_all.shape) != 3:
-        raise ValueError(f"Expected 3D array (samples, timesteps, features), got shape {x_all.shape}")
-
-    x = np.reshape(x_all, (x_all.shape[0] * x_all.shape[1], x_all.shape[2]))
-
-    # Calculate mean and std for each feature
-    mean = np.mean(x, axis=0)
-    std = np.std(x, axis=0)
-
-    # Avoid division by zero
-    std = np.where(std == 0, 1, std)
-
-    # Normalize
-    x = (x - mean) / std
-
-    x_all = np.reshape(x, (x_all.shape[0], x_all.shape[1], x_all.shape[2]))
-
-    # Free memory
-    del x
-    gc.collect()
-
-    return x_all
-
-
-def user_data_split(x, y, samples_per_user):
-    """Split data to use specific number of samples per user"""
-    users, counts = np.unique(y, return_counts=True)
-    x_train = []
-    y_train = []
-
-    for user in users:
-        indx = np.where(y == user)[0]
-        np.random.shuffle(indx)
-        indx = indx[:samples_per_user]
-        x_train.append(x[indx])
-        y_train.append(y[indx])
-
-    x_train = np.concatenate(x_train, axis=0)
-    y_train = np.concatenate(y_train, axis=0)
-
-    return x_train, y_train
-
-
-def data_load(path, users, frame_size=30, max_samples_per_session=None):
+class EEGDataGenerator:
     """
-    Load EEG MMI data with session-level splitting to prevent data leakage.
-    Sessions per user: R01-R14
-    - Train: R01-R10 (10 sessions)
-    - Val: R11-R12 (2 sessions)
-    - Test: R13-R14 (2 sessions)
+    Generator for streaming EEG data in batches without loading everything into memory
+    """
+
+    def __init__(self, path, users, sessions, frame_size=30, batch_size=32,
+                 max_samples_per_session=None, mean=None, std=None, shuffle=True):
+        """
+        Args:
+            path: Base path to dataset
+            users: List of user IDs
+            sessions: List of session numbers
+            frame_size: Window size for sliding windows
+            batch_size: Number of samples per batch
+            max_samples_per_session: Limit samples per session
+            mean, std: Normalization statistics (if None, data won't be normalized)
+            shuffle: Whether to shuffle data each epoch
+        """
+        self.path = path
+        self.users = users
+        self.sessions = sessions
+        self.frame_size = frame_size
+        self.batch_size = batch_size
+        self.max_samples_per_session = max_samples_per_session
+        self.mean = mean
+        self.std = std
+        self.shuffle = shuffle
+
+        # Build file list
+        self.file_list = []
+        for user_id, user in enumerate(users):
+            user_folder = f"S{user:03d}"
+            for session in sessions:
+                filename = f"S{user:03d}R{session:02d}.edf"
+                filepath = os.path.join(path, user_folder, filename)
+                self.file_list.append((filepath, user_id))
+
+        self.n_files = len(self.file_list)
+        print(f"Generator initialized with {self.n_files} files")
+
+    def _process_file(self, filepath, user_id):
+        """Process a single file and return windows"""
+        data = load_edf_file(filepath, max_samples=self.max_samples_per_session)
+        if data is None or data.shape[0] < self.frame_size:
+            return None, None
+
+        # Truncate to multiple of frame_size
+        data = data[:(data.shape[0] // self.frame_size) * self.frame_size]
+
+        if data.shape[0] == 0:
+            return None, None
+
+        # Create sliding windows with 50% overlap
+        windows = np.lib.stride_tricks.sliding_window_view(
+            data, (self.frame_size, data.shape[1])
+        )[::self.frame_size // 2, :]
+
+        # Reshape from (n_windows, 1, frame_size, n_channels) to (n_windows, frame_size, n_channels)
+        if len(windows.shape) == 4:
+            windows = windows.squeeze(axis=1)
+        elif len(windows.shape) != 3:
+            print(f"Warning: Unexpected shape {windows.shape}")
+            return None, None
+
+        # Normalize if statistics are provided
+        if self.mean is not None and self.std is not None:
+            # Reshape, normalize, reshape back
+            original_shape = windows.shape
+            windows = windows.reshape(-1, windows.shape[-1])
+            windows = (windows - self.mean) / self.std
+            windows = windows.reshape(original_shape)
+
+        labels = np.full(windows.shape[0], user_id, dtype=np.int32)
+
+        return windows, labels
+
+    def __iter__(self):
+        """Iterator that yields batches of data"""
+        # Shuffle file list if requested
+        file_indices = np.arange(self.n_files)
+        if self.shuffle:
+            np.random.shuffle(file_indices)
+
+        batch_x = []
+        batch_y = []
+
+        for idx in file_indices:
+            filepath, user_id = self.file_list[idx]
+
+            try:
+                windows, labels = self._process_file(filepath, user_id)
+
+                if windows is None:
+                    continue
+
+                # Shuffle windows within file if requested
+                if self.shuffle:
+                    perm = np.random.permutation(len(windows))
+                    windows = windows[perm]
+                    labels = labels[perm]
+
+                # Add to batch
+                for i in range(len(windows)):
+                    batch_x.append(windows[i])
+                    batch_y.append(labels[i])
+
+                    if len(batch_x) == self.batch_size:
+                        yield np.array(batch_x), np.array(batch_y)
+                        batch_x = []
+                        batch_y = []
+
+                del windows, labels
+                gc.collect()
+
+            except Exception as e:
+                print(f"Error processing {filepath}: {e}")
+                continue
+
+        # Yield remaining samples
+        if len(batch_x) > 0:
+            yield np.array(batch_x), np.array(batch_y)
+
+    def get_steps_per_epoch(self):
+        """Estimate number of batches per epoch"""
+        # This is an estimate; actual value may vary slightly
+        total_samples = 0
+        for filepath, _ in self.file_list:
+            try:
+                data = load_edf_file(filepath, max_samples=self.max_samples_per_session)
+                if data is not None and data.shape[0] >= self.frame_size:
+                    n_samples = (data.shape[0] // self.frame_size) * self.frame_size
+                    n_windows = len(range(0, n_samples - self.frame_size + 1, self.frame_size // 2))
+                    total_samples += n_windows
+                del data
+                gc.collect()
+            except:
+                continue
+
+        return max(1, total_samples // self.batch_size)
+
+
+def data_load_with_generators(path, users, frame_size=30, batch_size=32,
+                              max_samples_per_session=None):
+    """
+    Create data generators for train/val/test splits with proper normalization.
 
     Args:
-        max_samples_per_session: Limit samples per session (e.g., 10000) to reduce memory
+        path: Base path to dataset
+        users: List of user IDs
+        frame_size: Window size for sliding windows
+        batch_size: Batch size for generators
+        max_samples_per_session: Limit samples per session
+
+    Returns:
+        train_gen, val_gen, test_gen, steps_per_epoch dict
     """
     train_sessions = list(range(1, 11))  # R01-R10
     val_sessions = [11, 12]  # R11-R12
     test_sessions = [13, 14]  # R13-R14
 
-    print("Loading training data...")
-    x_train, y_train, sessions_train = data_load_origin(
+    # Compute normalization statistics from training data only
+    print("Computing normalization statistics from training data...")
+    mean, std = compute_normalization_stats(
         path, users, train_sessions, frame_size, max_samples_per_session
     )
-    print(f"Training samples: {x_train.shape[0]}")
 
-    print("Loading validation data...")
-    x_val, y_val, sessions_val = data_load_origin(
-        path, users, val_sessions, frame_size, max_samples_per_session
+    # Create generators
+    print("Creating training generator...")
+    train_gen = EEGDataGenerator(
+        path, users, train_sessions, frame_size, batch_size,
+        max_samples_per_session, mean, std, shuffle=True
     )
-    print(f"Validation samples: {x_val.shape[0]}")
 
-    print("Loading test data...")
-    x_test, y_test, sessions_test = data_load_origin(
-        path, users, test_sessions, frame_size, max_samples_per_session
+    print("Creating validation generator...")
+    val_gen = EEGDataGenerator(
+        path, users, val_sessions, frame_size, batch_size,
+        max_samples_per_session, mean, std, shuffle=False
     )
-    print(f"Test samples: {x_test.shape[0]}")
 
-    return x_train, y_train, x_val, y_val, x_test, y_test, sessions_train
+    print("Creating test generator...")
+    test_gen = EEGDataGenerator(
+        path, users, test_sessions, frame_size, batch_size,
+        max_samples_per_session, mean, std, shuffle=False
+    )
 
+    # Get steps per epoch (optional, for progress tracking)
+    steps = {
+        'train': train_gen.get_steps_per_epoch(),
+        'val': val_gen.get_steps_per_epoch(),
+        'test': test_gen.get_steps_per_epoch()
+    }
 
-def norma(x_train, x_val, x_test):
-    """Normalize train/val/test data using z-score normalization fit on training data"""
-    # Validate shapes
-    if len(x_train.shape) != 3 or len(x_val.shape) != 3 or len(x_test.shape) != 3:
-        raise ValueError(
-            f"Expected 3D arrays, got shapes: train={x_train.shape}, val={x_val.shape}, test={x_test.shape}")
+    print(f"Estimated steps per epoch - Train: {steps['train']}, Val: {steps['val']}, Test: {steps['test']}")
 
-    # Reshape and fit on training data only
-    x = np.reshape(x_train, (x_train.shape[0] * x_train.shape[1], x_train.shape[2]))
-
-    # Calculate mean and std from training data
-    mean = np.mean(x, axis=0)
-    std = np.std(x, axis=0)
-
-    # Avoid division by zero
-    std = np.where(std == 0, 1, std)
-
-    # Normalize training data
-    x = (x - mean) / std
-    x_train = np.reshape(x, (x_train.shape[0], x_train.shape[1], x_train.shape[2]))
-
-    # Free memory
-    del x
-    gc.collect()
-
-    # Transform validation data using training statistics
-    x = np.reshape(x_val, (x_val.shape[0] * x_val.shape[1], x_val.shape[2]))
-    x = (x - mean) / std
-    x_val = np.reshape(x, (x_val.shape[0], x_val.shape[1], x_val.shape[2]))
-
-    del x
-    gc.collect()
-
-    # Transform test data using training statistics
-    x = np.reshape(x_test, (x_test.shape[0] * x_test.shape[1], x_test.shape[2]))
-    x = (x - mean) / std
-    x_test = np.reshape(x, (x_test.shape[0], x_test.shape[1], x_test.shape[2]))
-
-    del x
-    gc.collect()
-
-    return x_train, x_val, x_test
+    return train_gen, val_gen, test_gen, steps
 
 
-def norma_pre(x_all):
-    """Normalize data using z-score normalization"""
-    if len(x_all.shape) != 3:
-        raise ValueError(f"Expected 3D array (samples, timesteps, features), got shape {x_all.shape}")
-
-    x = np.reshape(x_all, (x_all.shape[0] * x_all.shape[1], x_all.shape[2]))
-
-    # Calculate mean and std for each feature
-    mean = np.mean(x, axis=0)
-    std = np.std(x, axis=0)
-
-    # Avoid division by zero
-    std = np.where(std == 0, 1, std)
-
-    # Normalize
-    x = (x - mean) / std
-
-    x_all = np.reshape(x, (x_all.shape[0], x_all.shape[1], x_all.shape[2]))
-
-    del x
-    gc.collect()
-
-    return x_all
-
-
-def aug_data(x_train, y_train, transformations, sigma_l, ext, batch_size=100):
+class AugmentedEEGDataGenerator:
     """
-    Apply data augmentation transformations with batching to reduce memory
-
-    Args:
-        batch_size: Process this many samples at a time
+    Generator that applies data augmentation on-the-fly
     """
-    window_size = x_train.shape[1]
-    num_sample = x_train.shape[0]
-    if ext:
-        m_ = len(transformations) + 1
-    else:
-        m_ = 2
 
-    # Pre-allocate arrays
-    x_train_pro = np.zeros((len(transformations), num_sample * m_, window_size, x_train.shape[-1]), dtype=np.float32)
-    y_train_pro = np.zeros((len(transformations), num_sample * m_), dtype=bool)
+    def __init__(self, base_generator, transformations, sigma_l, ext=False):
+        """
+        Args:
+            base_generator: Base EEGDataGenerator instance
+            transformations: List of transformation functions
+            sigma_l: List of sigma values for transformations
+            ext: Whether to use extended augmentation
+        """
+        self.base_generator = base_generator
+        self.transformations = transformations
+        self.sigma_l = sigma_l
+        self.ext = ext
+        self.n_transforms = len(transformations)
 
-    # Process in batches to reduce memory pressure
-    for batch_start in range(0, num_sample, batch_size):
-        batch_end = min(batch_start + batch_size, num_sample)
+    def __iter__(self):
+        """Yields augmented batches"""
+        for batch_x, batch_y in self.base_generator:
+            # For each transformation
+            for i, (transform, sigma) in enumerate(zip(self.transformations, self.sigma_l)):
+                # Original samples (negative examples)
+                yield batch_x, np.zeros(len(batch_x), dtype=bool)
 
-        for j in range(batch_start, batch_end):
-            x_train_temp = np.copy(x_train[j])
-            for Jt, sigma, i in zip(transformations, sigma_l, range(len(transformations))):
-                x_train_pro[i, j * m_, :, :] = x_train_temp
-                y_train_pro[i, j * m_] = False
-                x_train_pro[i, j * m_ + 1, :, :] = Jt(x_train_temp, sigma=sigma)
-                y_train_pro[i, j * m_ + 1] = True
-                if ext:
-                    cnt = 1
-                    for k in range(len(transformations)):
-                        if i != k:
-                            x_train_pro[i, j * m_ + 1 + cnt, :, :] = transformations[k](x_train_temp, sigma=sigma_l[k])
-                            y_train_pro[i, j * m_ + 1 + cnt] = False
-                            cnt += 1
+                # Augmented samples (positive examples)
+                augmented = np.array([transform(x, sigma=sigma) for x in batch_x])
+                yield augmented, np.ones(len(batch_x), dtype=bool)
 
-        if (batch_end) % 1000 == 0:
-            print(f"Augmented {batch_end}/{num_sample} samples...")
-            gc.collect()
-
-    print(x_train_pro.shape)
-    print(y_train_pro.shape)
-    return x_train_pro, y_train_pro
+                # Extended augmentation: other transformations as negative examples
+                if self.ext:
+                    for j, (other_transform, other_sigma) in enumerate(zip(self.transformations, self.sigma_l)):
+                        if i != j:
+                            other_augmented = np.array([other_transform(x, sigma=other_sigma) for x in batch_x])
+                            yield other_augmented, np.zeros(len(batch_x), dtype=bool)
