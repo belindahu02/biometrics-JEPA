@@ -113,9 +113,9 @@ def pre_trainer(scen):
         x_.append(x_train[i])
         y_.append(y_train[i])
 
-    # Fixed batch size of 32
+    # Fixed batch size of 8
     history = model.fit(x_, y_, epochs=30, shuffle=True, callbacks=[Logger()],
-                        verbose=1, batch_size=32)
+                        verbose=1, batch_size=8)
 
     fet_extrct = model.layers[len(transformations)]
 

@@ -1,6 +1,7 @@
 import numpy as np
 import os
 import mne
+import gc
 
 
 def data_load_origin(path, users, folders, frame_size=30):
@@ -39,15 +40,21 @@ def user_data_split(x, y, samples_per_user):
 
 def load_edf_session(filepath, frame_size=40):
     """
-  Load a single EDF file and extract sliding windows.
-  Returns numpy array of shape (n_windows, frame_size, n_channels)
-  """
+    Load a single EDF file and extract sliding windows.
+    Returns numpy array of shape (n_windows, frame_size, n_channels)
+    Memory-efficient version with explicit cleanup.
+    """
     try:
         # Load EDF file
         raw = mne.io.read_raw_edf(filepath, preload=True, verbose=False)
 
         # Get data: shape (n_channels, n_timepoints)
         data = raw.get_data()
+
+        # Close and delete raw object to free memory
+        raw.close()
+        del raw
+        gc.collect()
 
         # Transpose to (n_timepoints, n_channels)
         data = data.T
@@ -61,39 +68,46 @@ def load_edf_session(filepath, frame_size=40):
         n_windows = (n_samples - frame_size) // stride + 1
 
         if n_windows <= 0:
+            del data
+            gc.collect()
             return None
 
-        # Create sliding windows
-        windows = []
+        # Create sliding windows using numpy's stride tricks (more memory efficient)
+        # Pre-allocate the array
+        windows = np.empty((n_windows, frame_size, n_channels), dtype=data.dtype)
+
         for i in range(n_windows):
             start_idx = i * stride
             end_idx = start_idx + frame_size
             if end_idx <= n_samples:
-                windows.append(data[start_idx:end_idx, :])
+                windows[i] = data[start_idx:end_idx, :]
 
-        if len(windows) == 0:
-            return None
+        # Clean up intermediate data
+        del data
+        gc.collect()
 
-        return np.array(windows)
+        return windows
 
     except Exception as e:
         print(f"Error loading {filepath}: {e}")
+        gc.collect()
         return None
 
 
 def data_load_eeg_mmi(path, users, frame_size=40):
     """
-  Load EEG MMI dataset with session-based splitting to avoid data leakage.
+    Load EEG MMI dataset with session-based splitting to avoid data leakage.
+    Memory-efficient version with incremental loading and dtype optimization.
 
-  Args:
-      path: Base path to EEG MMI dataset
-      users: List of user IDs (e.g., [1, 2, 3, ...])
-      frame_size: Size of sliding window frames
+    Args:
+        path: Base path to EEG MMI dataset
+        users: List of user IDs (e.g., [1, 2, 3, ...])
+        frame_size: Size of sliding window frames
 
-  Returns:
-      x_train, y_train, x_val, y_val, x_test, y_test, sessions
-      Each x is shape (n_samples, frame_size, n_channels)
-  """
+    Returns:
+        x_train, y_train, x_val, y_val, x_test, y_test, sessions
+        Each x is shape (n_samples, frame_size, n_channels)
+    """
     x_train_list = []
     y_train_list = []
     x_val_list = []
@@ -126,9 +140,13 @@ def data_load_eeg_mmi(path, users, frame_size=40):
             if os.path.exists(filepath):
                 data = load_edf_session(filepath, frame_size)
                 if data is not None:
+                    # Convert to float32 to save memory (default is float64)
+                    data = data.astype(np.float32)
                     x_train_list.append(data)
                     y_train_list.extend([user_id] * data.shape[0])
                     count += 1
+                    del data
+                    gc.collect()
 
         # Load validation sessions
         for session in val_sessions:
@@ -138,9 +156,12 @@ def data_load_eeg_mmi(path, users, frame_size=40):
             if os.path.exists(filepath):
                 data = load_edf_session(filepath, frame_size)
                 if data is not None:
+                    data = data.astype(np.float32)
                     x_val_list.append(data)
                     y_val_list.extend([user_id] * data.shape[0])
                     count += 1
+                    del data
+                    gc.collect()
 
         # Load testing sessions
         for session in test_sessions:
@@ -150,22 +171,44 @@ def data_load_eeg_mmi(path, users, frame_size=40):
             if os.path.exists(filepath):
                 data = load_edf_session(filepath, frame_size)
                 if data is not None:
+                    data = data.astype(np.float32)
                     x_test_list.append(data)
                     y_test_list.extend([user_id] * data.shape[0])
                     count += 1
+                    del data
+                    gc.collect()
 
         sessions.append(count)
         print(f"Loaded user {user_folder}: {count} sessions")
 
+        # Periodic garbage collection
+        if user_id % 10 == 0:
+            gc.collect()
+
     # Concatenate all data
-    x_train = np.concatenate(x_train_list, axis=0) if x_train_list else np.array([])
-    y_train = np.array(y_train_list)
+    print("Concatenating training data...")
+    x_train = np.concatenate(x_train_list, axis=0).astype(np.float32) if x_train_list else np.array([])
+    y_train = np.array(y_train_list, dtype=np.int32)
 
-    x_val = np.concatenate(x_val_list, axis=0) if x_val_list else np.array([])
-    y_val = np.array(y_val_list)
+    # Clear training lists to free memory
+    del x_train_list, y_train_list
+    gc.collect()
 
-    x_test = np.concatenate(x_test_list, axis=0) if x_test_list else np.array([])
-    y_test = np.array(y_test_list)
+    print("Concatenating validation data...")
+    x_val = np.concatenate(x_val_list, axis=0).astype(np.float32) if x_val_list else np.array([])
+    y_val = np.array(y_val_list, dtype=np.int32)
+
+    # Clear validation lists
+    del x_val_list, y_val_list
+    gc.collect()
+
+    print("Concatenating test data...")
+    x_test = np.concatenate(x_test_list, axis=0).astype(np.float32) if x_test_list else np.array([])
+    y_test = np.array(y_test_list, dtype=np.int32)
+
+    # Clear test lists
+    del x_test_list, y_test_list
+    gc.collect()
 
     print(f"Train shape: {x_train.shape}, Val shape: {x_val.shape}, Test shape: {x_test.shape}")
 
@@ -174,29 +217,45 @@ def data_load_eeg_mmi(path, users, frame_size=40):
 
 def norma(x_train, x_val, x_test):
     """
-  Normalize data using training set statistics.
-  Fits on training data and applies to all splits.
-  """
+    Normalize data using training set statistics.
+    Fits on training data and applies to all splits.
+    Memory-efficient version using float32.
+    """
+    # Ensure float32 dtype
+    x_train = x_train.astype(np.float32)
+    x_val = x_val.astype(np.float32)
+    x_test = x_test.astype(np.float32)
+
     # Reshape for normalization
     x_train_flat = np.reshape(x_train, (x_train.shape[0] * x_train.shape[1], x_train.shape[2]))
 
     # Calculate statistics from training data
-    mean = np.mean(x_train_flat, axis=0)
-    std = np.std(x_train_flat, axis=0)
+    mean = np.mean(x_train_flat, axis=0, dtype=np.float32)
+    std = np.std(x_train_flat, axis=0, dtype=np.float32)
     std[std == 0] = 1  # Avoid division by zero
 
     # Normalize training data
     x_train_normalized = (x_train_flat - mean) / std
     x_train = np.reshape(x_train_normalized, (x_train.shape[0], x_train.shape[1], x_train.shape[2]))
 
+    # Clear intermediate arrays
+    del x_train_flat, x_train_normalized
+    gc.collect()
+
     # Normalize validation data
     x_val_flat = np.reshape(x_val, (x_val.shape[0] * x_val.shape[1], x_val.shape[2]))
     x_val_normalized = (x_val_flat - mean) / std
     x_val = np.reshape(x_val_normalized, (x_val.shape[0], x_val.shape[1], x_val.shape[2]))
 
+    del x_val_flat, x_val_normalized
+    gc.collect()
+
     # Normalize test data
     x_test_flat = np.reshape(x_test, (x_test.shape[0] * x_test.shape[1], x_test.shape[2]))
     x_test_normalized = (x_test_flat - mean) / std
     x_test = np.reshape(x_test_normalized, (x_test.shape[0], x_test.shape[1], x_test.shape[2]))
+
+    del x_test_flat, x_test_normalized
+    gc.collect()
 
     return x_train, x_val, x_test

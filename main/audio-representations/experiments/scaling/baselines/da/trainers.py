@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import tensorflow as tf
 from tensorflow.keras import Input, Model
 from tensorflow.keras.layers import Dense, Flatten, Conv1D, BatchNormalization, ReLU, MaxPooling1D, Dropout
+import gc
 
 from backbones import *
 from data_loader import *
@@ -55,6 +56,7 @@ def cohen_kappa_score(y_true, y_pred, num_classes):
 def trainer(num_users):
     """
     Train model on specified number of users from EEG MMI dataset.
+    Memory-efficient version with aggressive cleanup.
 
     Args:
         num_users: Number of users to include in classification task
@@ -63,12 +65,12 @@ def trainer(num_users):
         test_acc: Test accuracy
         kappa_score: Cohen's Kappa score
     """
-    frame_size = 40  # Adjust based on EEG sampling rate
+    frame_size = 40
     BATCH_SIZE = 8
     AUTO = tf.data.AUTOTUNE
 
     path = "/app/data/1.0.0"
-    # path = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/mmi/dataset/physionet.org/files/eegmmidb/1.0.0"  # Update this path
+    # path = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/mmi/dataset/physionet.org/files/eegmmidb/1.0.0"
 
     # Use first num_users users
     users = list(range(1, num_users + 1))
@@ -97,29 +99,31 @@ def trainer(num_users):
     print(f"x_val: {x_val.shape}")
     print(f"x_test: {x_test.shape}")
 
-    # Use all available samples (no subsampling)
     print(f"Using 100% of training samples: {x_train.shape[0]}")
 
-    # Create datasets
+    # Create datasets with optimized memory settings
     SEED = 34
+
+    # Training dataset - don't cache to save memory
     ds_x = tf.data.Dataset.from_tensor_slices(x_train)
     ds_x = (
-        ds_x.shuffle(1024, seed=SEED)
+        ds_x.shuffle(1024, seed=SEED, reshuffle_each_iteration=True)
             .map(tf_magwarp, num_parallel_calls=AUTO)
             .batch(BATCH_SIZE)
-            .prefetch(AUTO)
+            .prefetch(2)  # Reduced prefetch buffer
     )
 
     ds_y = tf.data.Dataset.from_tensor_slices(y_train)
     ds_y = (
-        ds_y.shuffle(1024, seed=SEED)
+        ds_y.shuffle(1024, seed=SEED, reshuffle_each_iteration=True)
             .batch(BATCH_SIZE)
-            .prefetch(AUTO)
+            .prefetch(2)
     )
     ssl_ds = tf.data.Dataset.zip((ds_x, ds_y))
 
+    # Validation dataset - smaller prefetch
     val_ds = tf.data.Dataset.from_tensor_slices((x_val, y_val))
-    val_ds = val_ds.batch(BATCH_SIZE).prefetch(AUTO)
+    val_ds = val_ds.batch(BATCH_SIZE).prefetch(2)
 
     # Build model
     ks = 3
@@ -131,9 +135,7 @@ def trainer(num_users):
     x = MaxPooling1D(pool_size=4, strides=4)(x)
     x = Dropout(rate=0.1)(x)
     x = resnetblock_final(x, CR=32 * con, KS=ks)
-    # print("After resnetblock_final:", x.shape)
     x = Flatten()(x)
-    # print("After flatten:", x.shape)
     x = Dense(256, activation='relu')(x)
     x = Dense(64, activation='relu')(x)
     outputs = Dense(num_classes, activation='softmax')(x)
@@ -167,16 +169,32 @@ def trainer(num_users):
     )
 
     # Evaluate on test set
-    results = resnettssd.evaluate(x_test, y_test, verbose=0)
+    results = resnettssd.evaluate(x_test, y_test, verbose=0, batch_size=BATCH_SIZE)
     test_acc = results[1]
     print(f"Test accuracy: {test_acc:.4f}")
 
-    # Calculate Cohen's Kappa score
-    y_pred = resnettssd.predict(x_test, verbose=0)
+    # Calculate Cohen's Kappa score - predict in smaller batches to save memory
+    y_pred = resnettssd.predict(x_test, verbose=0, batch_size=BATCH_SIZE)
     kappa_score = cohen_kappa_score(y_test, y_pred, num_classes)
     print(f"Kappa score: {kappa_score:.4f}")
 
-    # Clear session to free memory
+    # Aggressive cleanup
+    del resnettssd, history, optimizer, lr_schedule
+    del ssl_ds, ds_x, ds_y, val_ds
+    del x_train, y_train, x_val, y_val, x_test, y_test
+    del y_pred
+
+    # Clear TensorFlow session
     tf.keras.backend.clear_session()
+
+    # Force garbage collection
+    gc.collect()
+
+    # Clear GPU memory if available
+    if tf.config.list_physical_devices('GPU'):
+        try:
+            tf.config.experimental.reset_memory_stats('GPU:0')
+        except:
+            pass
 
     return test_acc, kappa_score
