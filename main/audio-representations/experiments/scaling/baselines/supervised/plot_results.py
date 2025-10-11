@@ -3,7 +3,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # Base output directory on host
-base_dir = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data"
+base_dir = "test/"
+# base_dir = "/app/data/experiments/scaling/baselines"
 
 # Make sure these exist
 graph_data_dir = os.path.join(base_dir, "supervised/graph_data")
@@ -30,8 +31,8 @@ for num_users in variable:
     print(f"{'=' * 60}\n")
 
     # Run 10 iterations for each user count
-    for itr in range(10):
-        print(f"\nIteration {itr + 1}/10 for {num_users} users")
+    for itr in range(3):
+        print(f"\nIteration {itr + 1}/3 for {num_users} users")
         test_acc, kappa_score = trainer(num_users)
         acc_temp.append(test_acc)
         kappa_temp.append(kappa_score)
