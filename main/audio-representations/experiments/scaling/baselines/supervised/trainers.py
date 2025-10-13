@@ -12,7 +12,6 @@ def cohen_kappa(y_true, y_pred, num_classes):
     """
     Calculate Cohen's Kappa score manually with memory-efficient batch processing.
     """
-    # Convert predictions to class labels in chunks to avoid memory spike
     batch_size = 1000
     y_pred_labels = []
 
@@ -22,21 +21,17 @@ def cohen_kappa(y_true, y_pred, num_classes):
 
     y_pred_labels = np.array(y_pred_labels)
 
-    # Create confusion matrix
     confusion_matrix = np.zeros((num_classes, num_classes))
     for true, pred in zip(y_true, y_pred_labels):
         confusion_matrix[true, pred] += 1
 
-    # Calculate observed accuracy
     n = np.sum(confusion_matrix)
     po = np.trace(confusion_matrix) / n
 
-    # Calculate expected accuracy
     sum_rows = np.sum(confusion_matrix, axis=1)
     sum_cols = np.sum(confusion_matrix, axis=0)
     pe = np.sum(sum_rows * sum_cols) / (n * n)
 
-    # Calculate Cohen's Kappa
     if pe == 1.0:
         return 0.0
     kappa = (po - pe) / (1 - pe)
@@ -83,13 +78,17 @@ def evaluate_with_streaming_generator(model, generator, num_classes):
     return test_acc, kappa_score
 
 
-def trainer(num_users):
+def trainer(num_users, cache_size_gb=None):
     """
-    Train model on specified number of users using streaming data loader.
-    This version never loads all data into memory at once.
+    Train model on specified number of users using streaming data loader with caching.
 
     Args:
         num_users: Number of users to include in the classification task
+        cache_size_gb: Cache size in GB. Auto-configured if None:
+                      - 10-30 users: 4GB
+                      - 31-60 users: 8GB
+                      - 61-90 users: 12GB
+                      - 91+ users: 16GB
 
     Returns:
         test_acc: Test accuracy
@@ -101,12 +100,24 @@ def trainer(num_users):
 
     BATCH_SIZE = 8
 
+    # Auto-configure cache size based on number of users
+    if cache_size_gb is None:
+        if num_users <= 30:
+            cache_size_gb = 4
+        elif num_users <= 60:
+            cache_size_gb = 8
+        elif num_users <= 90:
+            cache_size_gb = 12
+        else:
+            cache_size_gb = 16
+
     # Use first num_users from the dataset
     users = list(range(1, num_users + 1))
     num_classes = num_users
 
     print(f"\n{'=' * 60}")
     print(f"Training with {num_users} users (streaming mode)")
+    print(f"Cache size: {cache_size_gb}GB")
     print(f"{'=' * 60}\n")
 
     # Step 1: Calculate normalization statistics from training data
@@ -114,7 +125,7 @@ def trainer(num_users):
         path, users, frame_size=frame_size, max_samples=10000
     )
 
-    # Step 2: Create streaming data generators
+    # Step 2: Create streaming data generators with caching
     print("\nCreating data generators...")
 
     train_generator = StreamingEEGDataGenerator(
@@ -124,7 +135,8 @@ def trainer(num_users):
         frame_size=frame_size,
         batch_size=BATCH_SIZE,
         shuffle=True,
-        normalization_stats=normalization_stats
+        normalization_stats=normalization_stats,
+        cache_size_gb=cache_size_gb
     )
 
     val_generator = StreamingEEGDataGenerator(
@@ -134,7 +146,8 @@ def trainer(num_users):
         frame_size=frame_size,
         batch_size=BATCH_SIZE,
         shuffle=False,
-        normalization_stats=normalization_stats
+        normalization_stats=normalization_stats,
+        cache_size_gb=cache_size_gb // 2  # Use less cache for val
     )
 
     test_generator = StreamingEEGDataGenerator(
@@ -144,7 +157,8 @@ def trainer(num_users):
         frame_size=frame_size,
         batch_size=BATCH_SIZE,
         shuffle=False,
-        normalization_stats=normalization_stats
+        normalization_stats=normalization_stats,
+        cache_size_gb=cache_size_gb // 2  # Use less cache for test
     )
 
     print(f"\nDataset summary:")
@@ -204,12 +218,16 @@ def trainer(num_users):
 
     # Step 5: Train model
     print("\nStarting training...")
+    print(f"Expected time per epoch: ~{len(train_generator) * 0.1:.0f} seconds")
+
     history = model.fit(
         train_generator,
         validation_data=val_generator,
         epochs=100,
         callbacks=[callback],
         verbose=1,
+        workers=1,
+        use_multiprocessing=False
     )
 
     # Step 6: Evaluate
@@ -218,7 +236,17 @@ def trainer(num_users):
         model, test_generator, num_classes
     )
 
+    # Print final cache statistics
+    print("\nFinal cache statistics:")
+    print(f"Training: {train_generator.session_cache.get_stats()}")
+    print(f"Validation: {val_generator.session_cache.get_stats()}")
+    print(f"Test: {test_generator.session_cache.get_stats()}")
+
     # Cleanup
+    train_generator.session_cache.clear()
+    val_generator.session_cache.clear()
+    test_generator.session_cache.clear()
+
     del model, history, train_generator, val_generator, test_generator
     del normalization_stats
 

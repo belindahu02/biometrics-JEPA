@@ -92,13 +92,13 @@ class AugmentedDataSequence(tf.keras.utils.Sequence):
 def pre_trainer(scen):
     """Pre-train feature extractor using generators"""
     frame_size = 40
-    # path = "/app/data/1.0.0"
-    path = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/mmi/dataset/physionet.org/files/eegmmidb/1.0.0"  # Update this path
+    path = "/app/data/1.0.0"
+    # path = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/mmi/dataset/physionet.org/files/eegmmidb/1.0.0"  # Update this path
 
     batch_size = 8  # Small batch size to manage memory
 
     # Use all users for pre-training
-    users = list(range(1, 2))
+    users = list(range(1, 109))
     train_sessions = list(range(1, 11))  # R01-R10 for pre-training
 
     print(f"Setting up pre-training for {len(users)} users...")

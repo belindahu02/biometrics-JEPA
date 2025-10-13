@@ -205,6 +205,7 @@ def create_plots(acc, kappa, num_completed, suffix=""):
     plt.figure(figsize=(12, 8))
     # Plot with NaN handling - matplotlib will skip NaN points
     plt.plot(valid_user_counts, kappa_max, 'b-o', label=f'{model_name}', linewidth=2, markersize=6)
+    plt.ylim(bottom=0)
     plt.title(f"Kappa Score vs {variable_name} (2D {NORMALIZATION_METHOD} normalization, {MODEL_TYPE} model){suffix}")
     plt.xlabel(variable_name)
     plt.ylabel("Kappa Score")
@@ -225,6 +226,7 @@ def create_plots(acc, kappa, num_completed, suffix=""):
     # Accuracy plot
     plt.figure(figsize=(12, 8))
     plt.plot(valid_user_counts, acc_max, 'r-s', label=f'{model_name}', linewidth=2, markersize=6)
+    plt.ylim(bottom=0)
     plt.title(f"Test Accuracy vs {variable_name} (2D {NORMALIZATION_METHOD} normalization, {MODEL_TYPE} model){suffix}")
     plt.xlabel(variable_name)
     plt.ylabel("Test Accuracy")

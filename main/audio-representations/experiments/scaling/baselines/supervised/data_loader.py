@@ -4,16 +4,81 @@ import os
 import mne
 import gc
 from tensorflow.keras.utils import Sequence
+from collections import OrderedDict
+
+
+class SessionCache:
+    """
+    LRU cache for EEG sessions to balance memory and speed.
+    Keeps recently used sessions in memory.
+    """
+
+    def __init__(self, max_cache_size_gb=8):
+        """
+        Args:
+            max_cache_size_gb: Maximum cache size in GB
+        """
+        self.cache = OrderedDict()
+        self.max_cache_size = max_cache_size_gb * 1024 ** 3  # Convert to bytes
+        self.current_size = 0
+        self.hits = 0
+        self.misses = 0
+
+    def _estimate_size(self, data):
+        """Estimate memory size of numpy array in bytes"""
+        return data.nbytes
+
+    def get(self, filepath):
+        """Get session data from cache or None if not cached"""
+        if filepath in self.cache:
+            # Move to end (most recently used)
+            self.cache.move_to_end(filepath)
+            self.hits += 1
+            return self.cache[filepath]
+        self.misses += 1
+        return None
+
+    def put(self, filepath, data):
+        """Add session data to cache, evicting old entries if needed"""
+        data_size = self._estimate_size(data)
+
+        # Evict old entries if needed
+        while self.current_size + data_size > self.max_cache_size and len(self.cache) > 0:
+            oldest_key, oldest_data = self.cache.popitem(last=False)
+            self.current_size -= self._estimate_size(oldest_data)
+            del oldest_data
+
+        # Add new entry
+        self.cache[filepath] = data
+        self.current_size += data_size
+
+    def clear(self):
+        """Clear the cache"""
+        self.cache.clear()
+        self.current_size = 0
+        gc.collect()
+
+    def get_stats(self):
+        """Get cache statistics"""
+        total = self.hits + self.misses
+        hit_rate = self.hits / total if total > 0 else 0
+        return {
+            'hits': self.hits,
+            'misses': self.misses,
+            'hit_rate': hit_rate,
+            'cache_size_mb': self.current_size / (1024 ** 2),
+            'num_cached': len(self.cache)
+        }
 
 
 class StreamingEEGDataGenerator(Sequence):
     """
-    Memory-efficient data generator that loads EEG data on-demand from disk.
-    Only keeps one batch in memory at a time.
+    Memory-efficient data generator with session-level caching.
+    Balances memory usage and speed by caching recently used sessions.
     """
 
     def __init__(self, path, users, split='train', frame_size=30, batch_size=8,
-                 shuffle=True, normalization_stats=None):
+                 shuffle=True, normalization_stats=None, cache_size_gb=8):
         """
         Args:
             path: Base path to dataset
@@ -23,6 +88,7 @@ class StreamingEEGDataGenerator(Sequence):
             batch_size: Batch size for training
             shuffle: Whether to shuffle data
             normalization_stats: Dict with 'mean' and 'std' for normalization
+            cache_size_gb: Size of session cache in GB (default 8GB)
         """
         self.path = path
         self.users = users
@@ -31,6 +97,9 @@ class StreamingEEGDataGenerator(Sequence):
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.normalization_stats = normalization_stats
+
+        # Initialize session cache
+        self.session_cache = SessionCache(max_cache_size_gb=cache_size_gb)
 
         # Define session ranges for each split
         if split == 'train':
@@ -53,7 +122,7 @@ class StreamingEEGDataGenerator(Sequence):
     def _build_index(self):
         """
         Build an index of all samples without loading the actual data.
-        Each entry contains: (user_id, user_folder, session, window_idx, total_windows)
+        Each entry contains: (user_id, filepath, window_idx)
         """
         self.sample_index = []
 
@@ -92,11 +161,8 @@ class StreamingEEGDataGenerator(Sequence):
                     for window_idx in range(n_windows):
                         self.sample_index.append({
                             'user_id': user_id,
-                            'user': user,
-                            'user_folder': user_folder,
-                            'session': session,
-                            'window_idx': window_idx,
-                            'filepath': filepath
+                            'filepath': filepath,
+                            'window_idx': window_idx
                         })
 
                 except Exception as e:
@@ -107,34 +173,38 @@ class StreamingEEGDataGenerator(Sequence):
         if len(self.sample_index) == 0:
             raise ValueError(f"No samples found for {self.split} split!")
 
-    def _load_window(self, sample_info):
+    def _load_session(self, filepath):
         """
-        Load a single window from an EDF file.
+        Load a session from cache or disk.
         """
-        filepath = sample_info['filepath']
-        window_idx = sample_info['window_idx']
+        # Check cache first
+        cached_data = self.session_cache.get(filepath)
+        if cached_data is not None:
+            return cached_data
 
-        # Load the full session (cached by MNE if same file)
+        # Load from disk
         raw = mne.io.read_raw_edf(filepath, preload=True, verbose=False)
-        data = raw.get_data().T  # Shape: (n_samples, n_channels)
-
-        # Clean up
+        data = raw.get_data().T.astype(np.float32)  # Shape: (n_samples, n_channels)
         raw.close()
         del raw
 
         # Truncate to multiple of frame_size
         data = data[:(data.shape[0] // self.frame_size) * self.frame_size]
 
-        # Extract the specific window with 50% overlap
+        # Add to cache
+        self.session_cache.put(filepath, data)
+
+        return data
+
+    def _extract_window(self, data, window_idx):
+        """Extract a window from session data"""
         stride = self.frame_size // 2
         start_idx = window_idx * stride
         end_idx = start_idx + self.frame_size
 
-        window = data[start_idx:end_idx, :].astype(np.float32)
+        window = data[start_idx:end_idx, :].copy()
 
-        del data
-
-        # Apply normalization if available
+        # Apply normalization
         if self.normalization_stats is not None:
             mean = self.normalization_stats['mean']
             std = self.normalization_stats['std']
@@ -148,17 +218,13 @@ class StreamingEEGDataGenerator(Sequence):
 
     def __getitem__(self, idx):
         """
-        Generate one batch of data by loading from disk on-demand.
+        Generate one batch of data using cached sessions.
         """
         # Get batch indices
         batch_indices = self.indices[idx * self.batch_size:(idx + 1) * self.batch_size]
 
-        # Load windows for this batch
-        batch_X = []
-        batch_y = []
-
-        # Group by file to minimize file I/O
-        file_groups = {}
+        # Group samples by file to maximize cache efficiency
+        file_groups = OrderedDict()
         for i in batch_indices:
             sample_info = self.sample_index[i]
             filepath = sample_info['filepath']
@@ -166,44 +232,32 @@ class StreamingEEGDataGenerator(Sequence):
                 file_groups[filepath] = []
             file_groups[filepath].append(sample_info)
 
-        # Load all windows from each file
-        for filepath, samples in file_groups.items():
-            # Load file once
-            raw = mne.io.read_raw_edf(filepath, preload=True, verbose=False)
-            data = raw.get_data().T.astype(np.float32)
-            raw.close()
-            del raw
+        # Load windows from cached or disk sessions
+        batch_X = []
+        batch_y = []
 
-            # Truncate
-            data = data[:(data.shape[0] // self.frame_size) * self.frame_size]
+        for filepath, samples in file_groups.items():
+            # Load session (from cache or disk)
+            session_data = self._load_session(filepath)
 
             # Extract windows
             for sample_info in samples:
-                window_idx = sample_info['window_idx']
-                stride = self.frame_size // 2
-                start_idx = window_idx * stride
-                end_idx = start_idx + self.frame_size
-
-                window = data[start_idx:end_idx, :]
-
-                # Apply normalization
-                if self.normalization_stats is not None:
-                    mean = self.normalization_stats['mean']
-                    std = self.normalization_stats['std']
-                    window = (window - mean) / std
-
+                window = self._extract_window(session_data, sample_info['window_idx'])
                 batch_X.append(window)
                 batch_y.append(sample_info['user_id'])
-
-            del data
-            gc.collect()
 
         return np.array(batch_X, dtype=np.float32), np.array(batch_y, dtype=np.int32)
 
     def on_epoch_end(self):
-        """Shuffle indices after each epoch"""
+        """Shuffle indices after each epoch and print cache stats"""
         if self.shuffle:
             np.random.shuffle(self.indices)
+
+        # Print cache statistics
+        stats = self.session_cache.get_stats()
+        print(f"\nCache stats - Hit rate: {stats['hit_rate']:.2%}, "
+              f"Size: {stats['cache_size_mb']:.1f}MB, "
+              f"Cached sessions: {stats['num_cached']}")
 
     def get_num_classes(self):
         """Get number of unique users"""
@@ -260,7 +314,7 @@ def calculate_normalization_stats(path, users, frame_size=30, max_samples=10000)
                 # Take random samples
                 if data.shape[0] >= frame_size:
                     # Randomly sample a few windows from this file
-                    data = data[:(data.shape[0] // frame_size) * frame_size]
+                    data = data[:(data.shape[0] // frame_size) * self.frame_size]
                     num_windows = min(5, data.shape[0] // frame_size)  # Max 5 windows per file
 
                     for _ in range(num_windows):
