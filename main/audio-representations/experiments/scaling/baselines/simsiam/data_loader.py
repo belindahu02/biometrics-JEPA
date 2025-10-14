@@ -59,6 +59,242 @@ def create_windows(data, frame_size=30, overlap=0.5):
     return windowed.copy()
 
 
+class EEGDataGenerator:
+    """Generator that yields batches of EEG data on-the-fly"""
+
+    def __init__(self, path, users, folders, frame_size=30, batch_size=32,
+                 max_samples_per_session=None, shuffle=True, normalization_params=None):
+        self.path = path
+        self.users = users
+        self.folders = folders
+        self.frame_size = frame_size
+        self.batch_size = batch_size
+        self.max_samples_per_session = max_samples_per_session
+        self.shuffle = shuffle
+        self.normalization_params = normalization_params
+
+        # Define session splits
+        self.train_runs = list(range(1, 11))  # R01-R10
+        self.val_runs = [11, 12]  # R11-R12
+        self.test_runs = [13, 14]  # R13-R14
+
+        if 'TrainingSet' in folders:
+            self.use_runs = self.train_runs
+        elif 'TestingSet' in folders:
+            self.use_runs = self.val_runs
+        elif 'TestingSet_secret' in folders:
+            self.use_runs = self.test_runs
+        else:
+            self.use_runs = self.train_runs
+
+        # Build file list
+        self.file_list = self._build_file_list()
+        self.total_samples = len(self.file_list)
+
+    def _build_file_list(self):
+        """Build list of (filepath, user_id) tuples"""
+        file_list = []
+
+        for user_id, user in enumerate(self.users):
+            user_folder = f"S{user:03d}"
+            user_path = os.path.join(self.path, user_folder)
+
+            if not os.path.exists(user_path):
+                continue
+
+            for run in self.use_runs:
+                filename = f"S{user:03d}R{run:02d}.edf"
+                filepath = os.path.join(user_path, filename)
+
+                if os.path.exists(filepath):
+                    file_list.append((filepath, user_id))
+
+        return file_list
+
+    def __len__(self):
+        """Return approximate number of batches"""
+        # This is an estimate; actual count may vary
+        return max(1, self.total_samples // self.batch_size)
+
+    def __iter__(self):
+        """Iterator that yields batches"""
+        indices = np.arange(len(self.file_list))
+
+        if self.shuffle:
+            np.random.shuffle(indices)
+
+        batch_x = []
+        batch_y = []
+
+        for idx in indices:
+            filepath, user_id = self.file_list[idx]
+
+            # Load file
+            data = load_edf_file(filepath)
+            if data is None:
+                continue
+
+            # Create windows
+            windowed = create_windows(data, frame_size=self.frame_size, overlap=0.5)
+            del data
+            gc.collect()
+
+            if windowed is None or windowed.shape[0] == 0:
+                continue
+
+            # Limit samples if specified
+            if self.max_samples_per_session is not None and windowed.shape[0] > self.max_samples_per_session:
+                sample_indices = np.random.choice(windowed.shape[0], self.max_samples_per_session, replace=False)
+                windowed = windowed[sample_indices]
+
+            # Normalize if parameters provided
+            if self.normalization_params is not None:
+                original_shape = windowed.shape
+                windowed_flat = windowed.reshape(-1, windowed.shape[-1])
+                windowed_flat = apply_standardization(
+                    windowed_flat,
+                    self.normalization_params['mean'],
+                    self.normalization_params['std']
+                )
+                windowed = windowed_flat.reshape(original_shape)
+                del windowed_flat
+
+            # Add to batch
+            for window in windowed:
+                batch_x.append(window)
+                batch_y.append(user_id)
+
+                if len(batch_x) == self.batch_size:
+                    yield np.array(batch_x, dtype=np.float32), np.array(batch_y, dtype=np.int32)
+                    batch_x = []
+                    batch_y = []
+
+            del windowed
+            gc.collect()
+
+        # Yield remaining samples
+        if len(batch_x) > 0:
+            yield np.array(batch_x, dtype=np.float32), np.array(batch_y, dtype=np.int32)
+
+
+def compute_normalization_params(path, users, folders, frame_size=30, max_files=10):
+    """
+    Compute normalization parameters from a subset of data
+    """
+    print("Computing normalization parameters...")
+
+    train_runs = list(range(1, 11))
+
+    if 'TrainingSet' in folders:
+        use_runs = train_runs
+    else:
+        use_runs = train_runs
+
+    all_data = []
+    file_count = 0
+
+    for user in users[:min(10, len(users))]:  # Use first 10 users
+        user_folder = f"S{user:03d}"
+        user_path = os.path.join(path, user_folder)
+
+        if not os.path.exists(user_path):
+            continue
+
+        for run in use_runs[:2]:  # Use first 2 runs per user
+            filename = f"S{user:03d}R{run:02d}.edf"
+            filepath = os.path.join(user_path, filename)
+
+            if not os.path.exists(filepath):
+                continue
+
+            data = load_edf_file(filepath)
+            if data is None:
+                continue
+
+            windowed = create_windows(data, frame_size=frame_size, overlap=0.5)
+            del data
+            gc.collect()
+
+            if windowed is not None and windowed.shape[0] > 0:
+                # Sample a subset
+                sample_size = min(100, windowed.shape[0])
+                sample_indices = np.random.choice(windowed.shape[0], sample_size, replace=False)
+                all_data.append(windowed[sample_indices])
+                file_count += 1
+
+            del windowed
+            gc.collect()
+
+            if file_count >= max_files:
+                break
+
+        if file_count >= max_files:
+            break
+
+    if len(all_data) == 0:
+        raise ValueError("No data loaded for normalization")
+
+    # Concatenate and compute statistics
+    all_data = np.concatenate(all_data, axis=0)
+    all_data_flat = all_data.reshape(-1, all_data.shape[-1])
+    _, mean, std = standardize(all_data_flat)
+
+    del all_data, all_data_flat
+    gc.collect()
+
+    print(f"Normalization params computed from {file_count} files")
+    return {'mean': mean, 'std': std}
+
+
+def data_load_with_generators(path, users, frame_size=30, batch_size=32,
+                              max_samples_per_session=None):
+    """
+    Create generators for train/val/test splits
+    Returns generators and step counts
+    """
+    # Compute normalization parameters from training data
+    norm_params = compute_normalization_params(
+        path, users, ['TrainingSet'], frame_size=frame_size
+    )
+
+    # Create generators
+    train_gen = EEGDataGenerator(
+        path, users, ['TrainingSet'],
+        frame_size=frame_size,
+        batch_size=batch_size,
+        max_samples_per_session=max_samples_per_session,
+        shuffle=True,
+        normalization_params=norm_params
+    )
+
+    val_gen = EEGDataGenerator(
+        path, users, ['TestingSet'],
+        frame_size=frame_size,
+        batch_size=batch_size,
+        max_samples_per_session=max_samples_per_session,
+        shuffle=False,
+        normalization_params=norm_params
+    )
+
+    test_gen = EEGDataGenerator(
+        path, users, ['TestingSet_secret'],
+        frame_size=frame_size,
+        batch_size=batch_size,
+        max_samples_per_session=max_samples_per_session,
+        shuffle=False,
+        normalization_params=norm_params
+    )
+
+    # Estimate steps per epoch
+    steps = {
+        'train': len(train_gen),
+        'val': len(val_gen),
+        'test': len(test_gen)
+    }
+
+    return train_gen, val_gen, test_gen, steps
+
+
 def data_load_origin(path, users, folders, frame_size=30, max_samples_per_user=None):
     """
     Load EEG data from EDF files with session-level splitting

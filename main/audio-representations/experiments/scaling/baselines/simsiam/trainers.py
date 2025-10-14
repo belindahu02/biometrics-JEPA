@@ -85,7 +85,7 @@ class CachedGeneratorSequence(tf.keras.utils.Sequence):
         gc.collect()
 
 
-def trainer(num_users, fet_extrct, scen, ft):
+def trainer(num_users, fet_extrct, scen, ft, checkpoint_dir=None):
     """
     Train classifier with specified number of users using generators.
 
@@ -94,6 +94,7 @@ def trainer(num_users, fet_extrct, scen, ft):
         fet_extrct: Pre-trained feature extractor
         scen: Scenario number
         ft: Fine-tuning configuration (0-5)
+        checkpoint_dir: Directory for checkpoints (optional)
     """
     ft_dict = {0: 17, 1: 12, 2: 11, 3: 8, 4: 5, 5: 0}
     ft = ft_dict[ft]
@@ -103,14 +104,12 @@ def trainer(num_users, fet_extrct, scen, ft):
         fet_extrct.layers[i].trainable = False
 
     frame_size = 40
-    # path = "/app/data/1.0.0"
-    path = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/mmi/dataset/physionet.org/files/eegmmidb/1.0.0"  # Update this path
+    path = "/app/data/1.0.0"
 
     batch_size = 8  # Small batch size to manage memory
 
     # Select users based on num_users parameter
-    # users = list(range(1, num_users + 1))
-    users = list(range(1, 2))
+    users = list(range(1, num_users + 1))
 
     print(f"\n{'=' * 60}")
     print(f"Training with {num_users} users")
@@ -205,6 +204,8 @@ def trainer(num_users, fet_extrct, scen, ft):
 
     # Clean up
     del all_y_true, all_y_pred, train_sequence, val_sequence, test_sequence
+    del resnettssd
     gc.collect()
+    tf.keras.backend.clear_session()
 
     return test_acc, kappa_score

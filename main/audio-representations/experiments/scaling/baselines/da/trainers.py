@@ -53,10 +53,84 @@ def cohen_kappa_score(y_true, y_pred, num_classes):
     return kappa
 
 
+class AugmentedDataGenerator(tf.keras.utils.Sequence):
+    """
+    Wrapper generator that applies data augmentation on top of EEGDataGenerator.
+    """
+
+    def __init__(self, base_generator, augmentation_fn=None):
+        """
+        Args:
+            base_generator: EEGDataGenerator instance
+            augmentation_fn: Function to apply augmentation (e.g., tf_magwarp)
+        """
+        self.base_generator = base_generator
+        self.augmentation_fn = augmentation_fn
+
+    def __len__(self):
+        return len(self.base_generator)
+
+    def __getitem__(self, batch_idx):
+        X_batch, y_batch = self.base_generator[batch_idx]
+
+        if self.augmentation_fn is not None:
+            # Apply augmentation to each sample in batch
+            X_augmented = []
+            for i in range(X_batch.shape[0]):
+                aug_sample = self.augmentation_fn(X_batch[i]).numpy()
+                X_augmented.append(aug_sample)
+            X_batch = np.array(X_augmented, dtype=np.float32)
+
+        return X_batch, y_batch
+
+    def on_epoch_end(self):
+        self.base_generator.on_epoch_end()
+
+
+def evaluate_with_generator(model, generator, num_classes):
+    """
+    Evaluate model using a generator and compute accuracy and kappa.
+
+    Args:
+        model: Trained model
+        generator: Data generator
+        num_classes: Number of classes
+
+    Returns:
+        accuracy, kappa_score
+    """
+    y_true_list = []
+    y_pred_list = []
+
+    print("Evaluating model...")
+    for batch_idx in range(len(generator)):
+        X_batch, y_batch = generator[batch_idx]
+        y_pred_batch = model.predict(X_batch, verbose=0)
+
+        y_true_list.append(y_batch)
+        y_pred_list.append(y_pred_batch)
+
+        if (batch_idx + 1) % 100 == 0:
+            print(f"Evaluated {batch_idx + 1}/{len(generator)} batches")
+
+    # Concatenate all predictions
+    y_true = np.concatenate(y_true_list, axis=0)
+    y_pred = np.concatenate(y_pred_list, axis=0)
+
+    # Calculate accuracy
+    y_pred_classes = np.argmax(y_pred, axis=1)
+    accuracy = np.mean(y_true == y_pred_classes)
+
+    # Calculate kappa
+    kappa = cohen_kappa_score(y_true, y_pred, num_classes)
+
+    return accuracy, kappa
+
+
 def trainer(num_users):
     """
     Train model on specified number of users from EEG MMI dataset.
-    Memory-efficient version with aggressive cleanup.
+    Uses streaming/generator approach to avoid memory issues.
 
     Args:
         num_users: Number of users to include in classification task
@@ -67,7 +141,6 @@ def trainer(num_users):
     """
     frame_size = 40
     BATCH_SIZE = 8
-    AUTO = tf.data.AUTOTUNE
 
     path = "/app/data/1.0.0"
     # path = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/mmi/dataset/physionet.org/files/eegmmidb/1.0.0"
@@ -79,56 +152,61 @@ def trainer(num_users):
     print(f"Training with {num_users} users")
     print(f"{'=' * 60}")
 
-    # Load data with session-based splitting
-    x_train, y_train, x_val, y_val, x_test, y_test, sessions = data_load_eeg_mmi(
-        path, users=users, frame_size=frame_size
-    )
+    # Load data using streaming approach
+    train_files, val_files, test_files, mean, std, n_channels, train_samples, val_samples, test_samples = \
+        data_load_eeg_mmi_streaming(path, users=users, frame_size=frame_size)
 
-    print(f"Training samples: {x_train.shape[0]}")
-    print(f"Validation samples: {x_val.shape[0]}")
-    print(f"Testing samples: {x_test.shape[0]}")
+    print(f"Training samples: {train_samples}")
+    print(f"Validation samples: {val_samples}")
+    print(f"Testing samples: {test_samples}")
 
-    classes, counts = np.unique(y_train, return_counts=True)
-    num_classes = len(classes)
+    num_classes = num_users
     print(f"Number of classes: {num_classes}")
-    print(f"Minimum samples per user: {min(counts)}")
+    print(f"Number of channels: {n_channels}")
 
-    # Normalize data
-    x_train, x_val, x_test = norma(x_train, x_val, x_test)
-    print(f"x_train: {x_train.shape}")
-    print(f"x_val: {x_val.shape}")
-    print(f"x_test: {x_test.shape}")
-
-    print(f"Using 100% of training samples: {x_train.shape[0]}")
-
-    # Create datasets with optimized memory settings
-    SEED = 34
-
-    # Training dataset - don't cache to save memory
-    ds_x = tf.data.Dataset.from_tensor_slices(x_train)
-    ds_x = (
-        ds_x.shuffle(1024, seed=SEED, reshuffle_each_iteration=True)
-            .map(tf_magwarp, num_parallel_calls=AUTO)
-            .batch(BATCH_SIZE)
-            .prefetch(2)  # Reduced prefetch buffer
+    # Create data generators
+    print("Creating data generators...")
+    train_generator = EEGDataGenerator(
+        train_files,
+        frame_size,
+        mean,
+        std,
+        batch_size=BATCH_SIZE,
+        shuffle=True
     )
 
-    ds_y = tf.data.Dataset.from_tensor_slices(y_train)
-    ds_y = (
-        ds_y.shuffle(1024, seed=SEED, reshuffle_each_iteration=True)
-            .batch(BATCH_SIZE)
-            .prefetch(2)
+    # Wrap training generator with augmentation
+    train_generator_aug = AugmentedDataGenerator(
+        train_generator,
+        augmentation_fn=tf_magwarp
     )
-    ssl_ds = tf.data.Dataset.zip((ds_x, ds_y))
 
-    # Validation dataset - smaller prefetch
-    val_ds = tf.data.Dataset.from_tensor_slices((x_val, y_val))
-    val_ds = val_ds.batch(BATCH_SIZE).prefetch(2)
+    val_generator = EEGDataGenerator(
+        val_files,
+        frame_size,
+        mean,
+        std,
+        batch_size=BATCH_SIZE,
+        shuffle=False
+    )
+
+    test_generator = EEGDataGenerator(
+        test_files,
+        frame_size,
+        mean,
+        std,
+        batch_size=BATCH_SIZE,
+        shuffle=False
+    )
+
+    print(f"Train batches: {len(train_generator_aug)}")
+    print(f"Val batches: {len(val_generator)}")
+    print(f"Test batches: {len(test_generator)}")
 
     # Build model
     ks = 3
     con = 3
-    inputs = Input(shape=(frame_size, x_train.shape[-1]))
+    inputs = Input(shape=(frame_size, n_channels))
     x = Conv1D(filters=16 * con, kernel_size=ks, strides=1, padding='same')(inputs)
     x = BatchNormalization()(x)
     x = ReLU()(x)
@@ -159,30 +237,26 @@ def trainer(num_users):
         metrics=['accuracy']
     )
 
+    print("\nStarting training...")
     history = resnettssd.fit(
-        ssl_ds,
-        validation_data=val_ds,
+        train_generator_aug,
+        validation_data=val_generator,
         epochs=100,
         callbacks=[callback],
-        batch_size=BATCH_SIZE,
         verbose=1
     )
 
-    # Evaluate on test set
-    results = resnettssd.evaluate(x_test, y_test, verbose=0, batch_size=BATCH_SIZE)
-    test_acc = results[1]
-    print(f"Test accuracy: {test_acc:.4f}")
+    # Evaluate on test set using generator
+    print("\nEvaluating on test set...")
+    test_acc, kappa_score = evaluate_with_generator(resnettssd, test_generator, num_classes)
 
-    # Calculate Cohen's Kappa score - predict in smaller batches to save memory
-    y_pred = resnettssd.predict(x_test, verbose=0, batch_size=BATCH_SIZE)
-    kappa_score = cohen_kappa_score(y_test, y_pred, num_classes)
+    print(f"Test accuracy: {test_acc:.4f}")
     print(f"Kappa score: {kappa_score:.4f}")
 
     # Aggressive cleanup
     del resnettssd, history, optimizer, lr_schedule
-    del ssl_ds, ds_x, ds_y, val_ds
-    del x_train, y_train, x_val, y_val, x_test, y_test
-    del y_pred
+    del train_generator, train_generator_aug, val_generator, test_generator
+    del train_files, val_files, test_files
 
     # Clear TensorFlow session
     tf.keras.backend.clear_session()
