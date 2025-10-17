@@ -292,6 +292,7 @@ def calculate_normalization_stats(path, users, frame_size=30, max_samples=10000)
         user_path = os.path.join(path, user_folder)
 
         if not os.path.exists(user_path):
+            print(f"{user_path} does not exist")
             continue
 
         for session in train_sessions:
@@ -302,6 +303,7 @@ def calculate_normalization_stats(path, users, frame_size=30, max_samples=10000)
             filepath = os.path.join(user_path, filename)
 
             if not os.path.exists(filepath):
+                print(f"{filepath} does not exist")
                 continue
 
             try:
@@ -325,6 +327,7 @@ def calculate_normalization_stats(path, users, frame_size=30, max_samples=10000)
                         all_samples.append(window.reshape(-1, window.shape[-1]))
                         samples_collected += window.shape[0]
 
+                print(f"All samples: {len(all_samples)}")
                 del data
                 gc.collect()
 

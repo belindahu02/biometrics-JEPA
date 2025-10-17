@@ -167,50 +167,55 @@ class EEGDataGenerator:
         return windows, labels
 
     def __iter__(self):
-        """Iterator that yields batches of data"""
-        # Shuffle file list if requested
-        file_indices = np.arange(self.n_files)
-        if self.shuffle:
-            np.random.shuffle(file_indices)
+        """Iterator that yields batches of data - FIXED to work with multiple epochs"""
+        while True:  # CRITICAL FIX: Infinite loop to support multiple epochs
+            # Shuffle file list if requested
+            file_indices = np.arange(self.n_files)
+            if self.shuffle:
+                np.random.shuffle(file_indices)
 
-        batch_x = []
-        batch_y = []
+            batch_x = []
+            batch_y = []
 
-        for idx in file_indices:
-            filepath, user_id = self.file_list[idx]
+            for idx in file_indices:
+                filepath, user_id = self.file_list[idx]
 
-            try:
-                windows, labels = self._process_file(filepath, user_id)
+                try:
+                    windows, labels = self._process_file(filepath, user_id)
 
-                if windows is None:
+                    if windows is None:
+                        continue
+
+                    # Shuffle windows within file if requested
+                    if self.shuffle:
+                        perm = np.random.permutation(len(windows))
+                        windows = windows[perm]
+                        labels = labels[perm]
+
+                    # Add to batch
+                    for i in range(len(windows)):
+                        batch_x.append(windows[i])
+                        batch_y.append(labels[i])
+
+                        if len(batch_x) == self.batch_size:
+                            yield np.array(batch_x), np.array(batch_y)
+                            batch_x = []
+                            batch_y = []
+
+                    del windows, labels
+                    gc.collect()
+
+                except Exception as e:
+                    print(f"Error processing {filepath}: {e}")
                     continue
 
-                # Shuffle windows within file if requested
-                if self.shuffle:
-                    perm = np.random.permutation(len(windows))
-                    windows = windows[perm]
-                    labels = labels[perm]
+            # Yield remaining samples at end of epoch
+            if len(batch_x) > 0:
+                yield np.array(batch_x), np.array(batch_y)
+                batch_x = []
+                batch_y = []
 
-                # Add to batch
-                for i in range(len(windows)):
-                    batch_x.append(windows[i])
-                    batch_y.append(labels[i])
-
-                    if len(batch_x) == self.batch_size:
-                        yield np.array(batch_x), np.array(batch_y)
-                        batch_x = []
-                        batch_y = []
-
-                del windows, labels
-                gc.collect()
-
-            except Exception as e:
-                print(f"Error processing {filepath}: {e}")
-                continue
-
-        # Yield remaining samples
-        if len(batch_x) > 0:
-            yield np.array(batch_x), np.array(batch_y)
+            # After going through all files once, loop continues for next epoch
 
     def get_steps_per_epoch(self):
         """Estimate number of batches per epoch"""

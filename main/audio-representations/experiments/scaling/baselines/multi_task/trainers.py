@@ -174,7 +174,9 @@ def trainer(num_users, fet_extrct, scen, ft, config=None):
     y_true_all = []
     y_pred_all = []
 
-    for batch_x, batch_y in test_dataset:
+    for step, (batch_x, batch_y) in enumerate(test_dataset):
+        if step >= steps['test']:  # CRITICAL: Stop after one epoch
+            break
         y_pred_batch = resnettssd.predict(batch_x, verbose=0)
         y_true_all.extend(batch_y.numpy())
         y_pred_all.append(y_pred_batch)

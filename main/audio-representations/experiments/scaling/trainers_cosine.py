@@ -30,26 +30,27 @@ class CosineClassifier(nn.Module):
     Cosine similarity-based classifier head.
     Normalizes both embeddings and weights, then computes scaled cosine similarity.
     """
+
     def __init__(self, in_features, num_classes, scale=30.0):
         super().__init__()
         self.in_features = in_features
         self.num_classes = num_classes
         self.scale = scale
-        
+
         # Learnable weight matrix (will be L2-normalized)
         self.weight = nn.Parameter(torch.randn(num_classes, in_features))
         nn.init.xavier_uniform_(self.weight)
-    
+
     def forward(self, x):
         # L2 normalize input embeddings
         x_norm = F.normalize(x, p=2, dim=1)
-        
+
         # L2 normalize weight vectors
         w_norm = F.normalize(self.weight, p=2, dim=1)
-        
+
         # Cosine similarity (dot product of normalized vectors)
         logits = F.linear(x_norm, w_norm)
-        
+
         # Scale logits
         return logits * self.scale
 
@@ -62,24 +63,25 @@ class LabelSmoothingCrossEntropy(nn.Module):
     Cross entropy loss with label smoothing.
     Prevents over-confident predictions by smoothing hard labels.
     """
+
     def __init__(self, smoothing=0.1):
         super().__init__()
         self.smoothing = smoothing
         self.confidence = 1.0 - smoothing
-    
+
     def forward(self, pred, target):
         # pred: (batch_size, num_classes) logits
         # target: (batch_size,) class indices
-        
+
         log_probs = F.log_softmax(pred, dim=1)
         num_classes = pred.size(1)
-        
+
         # Create smoothed labels
         with torch.no_grad():
             true_dist = torch.zeros_like(log_probs)
             true_dist.fill_(self.smoothing / (num_classes - 1))
             true_dist.scatter_(1, target.unsqueeze(1), self.confidence)
-        
+
         return torch.mean(torch.sum(-true_dist * log_probs, dim=1))
 
 
@@ -90,16 +92,17 @@ class WarmupScheduler:
     """
     Linear warmup followed by another scheduler.
     """
+
     def __init__(self, optimizer, warmup_epochs, base_scheduler=None):
         self.optimizer = optimizer
         self.warmup_epochs = warmup_epochs
         self.base_scheduler = base_scheduler
         self.current_epoch = 0
         self.base_lr = optimizer.param_groups[0]['lr']
-    
+
     def step(self, *args, **kwargs):
         self.current_epoch += 1
-        
+
         if self.current_epoch <= self.warmup_epochs:
             # Linear warmup
             lr = self.base_lr * (self.current_epoch / self.warmup_epochs)
@@ -108,7 +111,7 @@ class WarmupScheduler:
         elif self.base_scheduler is not None:
             # Use base scheduler after warmup
             self.base_scheduler.step(*args, **kwargs)
-    
+
     def get_last_lr(self):
         return [group['lr'] for group in self.optimizer.param_groups]
 
@@ -120,10 +123,11 @@ class ModelWithCosineClassifier(nn.Module):
     """
     Wraps backbone and replaces final layer with cosine classifier.
     """
+
     def __init__(self, backbone, num_classes, embedding_dim, scale=30.0):
         super().__init__()
         self.backbone = backbone
-        
+
         # Remove the final classification layer from backbone
         if hasattr(backbone, 'fc'):
             self.embedding_dim = backbone.fc.in_features
@@ -133,10 +137,10 @@ class ModelWithCosineClassifier(nn.Module):
             backbone.classifier = nn.Identity()
         else:
             self.embedding_dim = embedding_dim
-        
+
         # Add cosine classifier
         self.cosine_classifier = CosineClassifier(self.embedding_dim, num_classes, scale)
-    
+
     def forward(self, x):
         embeddings = self.backbone(x)
         logits = self.cosine_classifier(embeddings)
@@ -641,7 +645,7 @@ def spectrogram_trainer_2d(data_path, user_ids,
                 with torch.cuda.amp.autocast():
                     outputs = model(xb)
                     loss = criterion(outputs, yb)
-                    
+
                     # Monitor probability distribution
                     probs = F.softmax(outputs, dim=1)
                     if batch_idx % 50 == 0:
@@ -649,17 +653,17 @@ def spectrogram_trainer_2d(data_path, user_ids,
                         max_prob = mean_probs.max().item()
                         min_prob = mean_probs.min().item()
                         std_prob = probs.std(dim=1).mean().item()
-                        logger.info(f"Epoch {epoch+1} Batch {batch_idx}: "
-                                  f"max_mean_prob={max_prob:.4f}, min_mean_prob={min_prob:.4f}, "
-                                  f"avg_std={std_prob:.4f}")
-                
+                        logger.info(f"Epoch {epoch + 1} Batch {batch_idx}: "
+                                    f"max_mean_prob={max_prob:.4f}, min_mean_prob={min_prob:.4f}, "
+                                    f"avg_std={std_prob:.4f}")
+
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
             else:
                 outputs = model(xb)
                 loss = criterion(outputs, yb)
-                
+
                 # Monitor probability distribution
                 if batch_idx % 50 == 0:
                     probs = F.softmax(outputs, dim=1)
@@ -667,10 +671,10 @@ def spectrogram_trainer_2d(data_path, user_ids,
                     max_prob = mean_probs.max().item()
                     min_prob = mean_probs.min().item()
                     std_prob = probs.std(dim=1).mean().item()
-                    logger.info(f"Epoch {epoch+1} Batch {batch_idx}: "
-                              f"max_mean_prob={max_prob:.4f}, min_mean_prob={min_prob:.4f}, "
-                              f"avg_std={std_prob:.4f}")
-                
+                    logger.info(f"Epoch {epoch + 1} Batch {batch_idx}: "
+                                f"max_mean_prob={max_prob:.4f}, min_mean_prob={min_prob:.4f}, "
+                                f"avg_std={std_prob:.4f}")
+
                 loss.backward()
                 optimizer.step()
 

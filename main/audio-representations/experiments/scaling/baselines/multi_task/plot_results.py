@@ -6,7 +6,7 @@ import gc
 
 # Base output directory on host
 # base_dir = "test/"
-base_dir = "/app/data/experiments/scaling/baselines"
+base_dir = "/app/data/experiments/baselines"
 
 # Make sure these exist
 graph_data_dir = os.path.join(base_dir, "multi_task/graph_data")

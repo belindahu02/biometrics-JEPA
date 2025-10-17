@@ -19,6 +19,7 @@ model_name = "eeg_mmi_user_scaling_supervised"
 
 # Test with increasing numbers of users: 10, 20, 30, ..., 100, 109
 variable = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 109]
+#variable = [109]
 
 acc = []
 kappa = []
