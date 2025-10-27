@@ -1,12 +1,13 @@
 import torch.nn as nn
 
 
-# Basic ResNet block for 2D spectrograms
+# Basic ResNet block for 2D spectrograms WITH DROPOUT
 class ResNetBlock2D(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=(3, 3), stride=(1, 1), skip=True):
+    def __init__(self, in_channels, out_channels, kernel_size=(3, 3), stride=(1, 1), skip=True, dropout_rate=0.0):
         super().__init__()
         self.skip = skip
         self.stride = stride
+        self.dropout_rate = dropout_rate
 
         # Three convolutional layers with batch normalization
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size,
@@ -19,6 +20,12 @@ class ResNetBlock2D(nn.Module):
 
         self.conv3 = nn.Conv2d(out_channels, out_channels, kernel_size,
                                stride=(1, 1), padding='same')
+
+        # Add dropout after conv layers
+        if dropout_rate > 0:
+            self.dropout = nn.Dropout2d(dropout_rate)
+        else:
+            self.dropout = nn.Identity()
 
         # Skip connection adjustment for channel/spatial dimension changes
         if skip and (in_channels != out_channels or stride != (1, 1)):
@@ -33,7 +40,11 @@ class ResNetBlock2D(nn.Module):
     def forward(self, x):
         # Forward through conv layers
         out = self.relu(self.bn1(self.conv1(x)))
+        out = self.dropout(out)  # Apply dropout
+
         out = self.relu(self.bn2(self.conv2(out)))
+        out = self.dropout(out)  # Apply dropout
+
         out = self.conv3(out)
 
         # Skip connection
@@ -45,11 +56,12 @@ class ResNetBlock2D(nn.Module):
         return out
 
 
-# Final block with global pooling for 2D spectrograms
+# Final block with global pooling for 2D spectrograms WITH DROPOUT
 class ResNetBlockFinal2D(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=(3, 3), skip=True):
+    def __init__(self, in_channels, out_channels, kernel_size=(3, 3), skip=True, dropout_rate=0.0):
         super().__init__()
         self.skip = skip
+        self.dropout_rate = dropout_rate
 
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size, padding='same')
         self.bn1 = nn.BatchNorm2d(out_channels)
@@ -58,6 +70,12 @@ class ResNetBlockFinal2D(nn.Module):
         self.bn2 = nn.BatchNorm2d(out_channels)
 
         self.conv3 = nn.Conv2d(out_channels, out_channels, kernel_size, padding='same')
+
+        # Add dropout
+        if dropout_rate > 0:
+            self.dropout = nn.Dropout2d(dropout_rate)
+        else:
+            self.dropout = nn.Identity()
 
         if skip and in_channels != out_channels:
             self.shortcut = nn.Conv2d(in_channels, out_channels, 1)
@@ -70,7 +88,11 @@ class ResNetBlockFinal2D(nn.Module):
 
     def forward(self, x):
         out = self.relu(self.bn1(self.conv1(x)))
+        out = self.dropout(out)
+
         out = self.relu(self.bn2(self.conv2(out)))
+        out = self.dropout(out)
+
         out = self.conv3(out)
 
         if self.skip:
@@ -81,9 +103,17 @@ class ResNetBlockFinal2D(nn.Module):
         return out.squeeze(-1).squeeze(-1)  # [B, C]
 
 
-# Complete 2D ResNet for spectrograms
+# Complete 2D ResNet for spectrograms WITH DROPOUT
 class SpectrogramResNet(nn.Module):
-    def __init__(self, input_channels=1, num_classes=10, channels=None):
+    def __init__(self, input_channels=1, num_classes=10, channels=None, dropout_rate=0.0, classifier_dropout=0.0):
+        """
+        Args:
+            input_channels: Number of input channels (1 for grayscale spectrograms)
+            num_classes: Number of output classes
+            channels: List of channel sizes for each block
+            dropout_rate: Dropout rate for convolutional layers (Dropout2d)
+            classifier_dropout: Dropout rate before final classifier (standard Dropout)
+        """
         super().__init__()
 
         # Initial convolution
@@ -94,11 +124,17 @@ class SpectrogramResNet(nn.Module):
         self.initial_bn = nn.BatchNorm2d(channels[0])
         self.initial_pool = nn.MaxPool2d((3, 3), stride=(2, 2), padding=1)
 
-        # ResNet blocks
-        self.block1 = ResNetBlock2D(channels[0], channels[0])
-        self.block2 = ResNetBlock2D(channels[0], channels[1], stride=(2, 2))
-        self.block3 = ResNetBlock2D(channels[1], channels[2], stride=(2, 2))
-        self.block4 = ResNetBlockFinal2D(channels[2], channels[3])
+        # ResNet blocks with dropout
+        self.block1 = ResNetBlock2D(channels[0], channels[0], dropout_rate=dropout_rate)
+        self.block2 = ResNetBlock2D(channels[0], channels[1], stride=(2, 2), dropout_rate=dropout_rate)
+        self.block3 = ResNetBlock2D(channels[1], channels[2], stride=(2, 2), dropout_rate=dropout_rate)
+        self.block4 = ResNetBlockFinal2D(channels[2], channels[3], dropout_rate=dropout_rate)
+
+        # Dropout before classifier (standard dropout for 1D features)
+        if classifier_dropout > 0:
+            self.classifier_dropout = nn.Dropout(classifier_dropout)
+        else:
+            self.classifier_dropout = nn.Identity()
 
         # Classification head
         self.classifier = nn.Linear(channels[3], num_classes)
@@ -114,13 +150,24 @@ class SpectrogramResNet(nn.Module):
         x = self.block3(x)
         x = self.block4(x)
 
+        # Apply classifier dropout
+        x = self.classifier_dropout(x)
+
         x = self.classifier(x)
         return x
 
 
-# Lightweight version for smaller spectrograms
+# Lightweight version for smaller spectrograms WITH DROPOUT
 class LightweightSpectrogramResNet(nn.Module):
-    def __init__(self, input_channels=1, num_classes=10, channels=None):
+    def __init__(self, input_channels=1, num_classes=10, channels=None, dropout_rate=0.0, classifier_dropout=0.0):
+        """
+        Args:
+            input_channels: Number of input channels (1 for grayscale spectrograms)
+            num_classes: Number of output classes
+            channels: List of channel sizes for each block
+            dropout_rate: Dropout rate for convolutional layers (Dropout2d)
+            classifier_dropout: Dropout rate before final classifier (standard Dropout)
+        """
         super().__init__()
 
         # Initial convolution (smaller kernel, less aggressive stride)
@@ -130,10 +177,16 @@ class LightweightSpectrogramResNet(nn.Module):
                                       kernel_size=(3, 3), stride=(1, 1), padding=1)
         self.initial_bn = nn.BatchNorm2d(channels[0])
 
-        # ResNet blocks
-        self.block1 = ResNetBlock2D(channels[0], channels[0])
-        self.block2 = ResNetBlock2D(channels[0], channels[1])
-        self.block3 = ResNetBlockFinal2D(channels[1], channels[2])
+        # ResNet blocks with dropout
+        self.block1 = ResNetBlock2D(channels[0], channels[0], dropout_rate=dropout_rate)
+        self.block2 = ResNetBlock2D(channels[0], channels[1], dropout_rate=dropout_rate)
+        self.block3 = ResNetBlockFinal2D(channels[1], channels[2], dropout_rate=dropout_rate)
+
+        # Dropout before classifier
+        if classifier_dropout > 0:
+            self.classifier_dropout = nn.Dropout(classifier_dropout)
+        else:
+            self.classifier_dropout = nn.Identity()
 
         # Classification head
         self.classifier = nn.Linear(channels[2], num_classes)
@@ -145,6 +198,9 @@ class LightweightSpectrogramResNet(nn.Module):
         x = self.block1(x)
         x = self.block2(x)
         x = self.block3(x)
+
+        # Apply classifier dropout
+        x = self.classifier_dropout(x)
 
         x = self.classifier(x)
         return x

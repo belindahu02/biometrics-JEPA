@@ -75,23 +75,24 @@ def main(cfg: DictConfig):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     # Load pretrained weights
-    checkpoint_path = "/app/data/jepa_logs_subset10/xps/97d170e1/checkpoints/last.ckpt"
+    checkpoint_path = "/app/data/jepa_logs_time_mask_ckpt/last.ckpt"
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint["state_dict"])  # or just checkpoint if it's the state dict directly
 
+    log(f"Checkpoint {checkpoint_path} successfully loaded")
     model.eval()
     model.to(device)
     log("Model instantiated and moved to device.")
 
     # use mounted data path in Docker
-    csv_file = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data/files_audioset.csv"
-    data_dir = "/Users/belindahu/Desktop/thesis/biometrics-JEPA/main/audio-representations/data"
+    csv_file = "/app/data/files_evaluation_full.csv"
+    data_dir = "/app/data"
     log(f"Loading dataset from {csv_file}...")
     dataset = EvalDataset(csv_file, data_dir, crop_frames=cfg.model.encoder.img_size[1], repeat_short=True)
     dataloader = DataLoader(dataset, batch_size=16, shuffle=False, num_workers=4)
     log(f"Dataset loaded with {len(dataset)} samples.")
 
-    embeddings_dir = "/Users/belindahu/Desktop/thesis/biometrics-JE PA/main/audio-representations/data/eval_embeddings"
+    embeddings_dir = "/app/data/embeddings_full_time_mask"
     os.makedirs(embeddings_dir, exist_ok=True)
     log(f"Embeddings directory ready at {embeddings_dir}")
 

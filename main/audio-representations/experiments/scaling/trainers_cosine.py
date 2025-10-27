@@ -1,5 +1,5 @@
 # =============================================
-# Enhanced trainers_2d.py with Cosine Classifier, Label Smoothing, and Warmup
+# Enhanced trainers_2d.py with Cosine Classifier, Label Smoothing, Warmup, and DROPOUT
 # =============================================
 
 import numpy as np
@@ -26,6 +26,7 @@ torch.backends.cudnn.enabled = True
 # NEW: Cosine Classifier Head
 # =============================================
 class CosineClassifier(nn.Module):
+
     """
     Cosine similarity-based classifier head.
     Normalizes both embeddings and weights, then computes scaled cosine similarity.
@@ -339,9 +340,10 @@ def spectrogram_trainer_2d(data_path, user_ids,
                            max_cache_size=100,
                            use_cosine_classifier=True, cosine_scale=30.0,
                            label_smoothing=0.1, warmup_epochs=5,
-                           lr_scheduler_type='plateau', random_seed=None):  # <-- ADD THESE TWO PARAMETERS
+                           lr_scheduler_type='plateau', random_seed=None,
+                           dropout_rate=0.0, classifier_dropout=0.0, weight_decay=1e-4):
     """
-    Session-based PyTorch 2D spectrogram trainer with cosine classifier, label smoothing, and warmup.
+    Session-based PyTorch 2D spectrogram trainer with cosine classifier, label smoothing, warmup, and dropout.
 
     New parameters:
         use_cosine_classifier (bool): Whether to use cosine classifier instead of linear (default: True)
@@ -350,9 +352,12 @@ def spectrogram_trainer_2d(data_path, user_ids,
         warmup_epochs (int): Number of warmup epochs for learning rate (default: 5)
         lr_scheduler_type (str): Type of LR scheduler: 'plateau' or 'constant' (default: 'plateau')
         random_seed (int): Random seed for reproducibility (default: None)
+        dropout_rate (float): Dropout rate for conv layers (default: 0.0)
+        classifier_dropout (float): Dropout before classifier (default: 0.0)
+        weight_decay (float): Weight decay for optimizer (default: 1e-4)
     """
 
-    # 2. ADD: Set random seeds for reproducibility (ADD THIS AT THE START)
+    # Set random seeds for reproducibility
     if random_seed is not None:
         import random
         random.seed(random_seed)
@@ -401,6 +406,9 @@ def spectrogram_trainer_2d(data_path, user_ids,
         logger.info(f"Starting 2D training run: {run_id}")
         logger.info(f"Cosine Classifier: {use_cosine_classifier}, Scale: {cosine_scale}")
         logger.info(f"Label Smoothing: {label_smoothing}, Warmup Epochs: {warmup_epochs}")
+        if dropout_rate > 0 or classifier_dropout > 0:
+            logger.info(f"Using Dropout - Conv layers: {dropout_rate}, Classifier: {classifier_dropout}")
+        logger.info(f"Weight decay: {weight_decay}")
         logger.info(f"Model checkpoints will be saved to: {run_checkpoint_dir}")
 
     # --------------------------
@@ -482,7 +490,7 @@ def spectrogram_trainer_2d(data_path, user_ids,
     logger.info(f"User IDs included: {user_ids[:5]}...{user_ids[-5:] if len(user_ids) > 5 else user_ids}")
 
     # --------------------------
-    # Build model with cosine classifier
+    # Build model with cosine classifier and DROPOUT
     # --------------------------
     input_channels = input_shape[0]  # Should be 1 for grayscale spectrograms
 
@@ -490,14 +498,18 @@ def spectrogram_trainer_2d(data_path, user_ids,
         backbone = LightweightSpectrogramResNet(
             input_channels=input_channels,
             num_classes=num_classes,
-            channels=[32, 64, 128]
+            channels=[32, 64, 128],
+            dropout_rate=dropout_rate,
+            classifier_dropout=classifier_dropout
         )
         embedding_dim = 128  # Last channel dimension
     elif model_type == 'full':
         backbone = SpectrogramResNet(
             input_channels=input_channels,
             num_classes=num_classes,
-            channels=[64, 128, 256, 512]
+            channels=[64, 128, 256, 512],
+            dropout_rate=dropout_rate,
+            classifier_dropout=classifier_dropout
         )
         embedding_dim = 512  # Last channel dimension
     else:
@@ -524,15 +536,15 @@ def spectrogram_trainer_2d(data_path, user_ids,
     logger.info(f"Trainable parameters: {trainable_params:,}")
 
     # --------------------------
-    # Training setup with label smoothing and warmup
+    # Training setup with label smoothing, warmup, and WEIGHT DECAY
     # --------------------------
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     # Use label smoothing loss
     criterion = LabelSmoothingCrossEntropy(smoothing=label_smoothing)
     logger.info(f"Using Label Smoothing Cross Entropy with smoothing={label_smoothing}")
 
-    # Learning rate scheduler with warmup - MODIFIED TO SUPPORT BOTH TYPES
+    # Learning rate scheduler with warmup
     if lr_scheduler_type == 'plateau':
         base_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='max', factor=0.7, patience=15, min_lr=1e-6, verbose=True
@@ -592,8 +604,11 @@ def spectrogram_trainer_2d(data_path, user_ids,
                 'cosine_scale': cosine_scale,
                 'label_smoothing': label_smoothing,
                 'warmup_epochs': warmup_epochs,
-                'lr_scheduler_type': lr_scheduler_type,  # <-- ADD THIS
-                'random_seed': random_seed  # <-- ADD THIS
+                'lr_scheduler_type': lr_scheduler_type,
+                'random_seed': random_seed,
+                'dropout_rate': dropout_rate,
+                'classifier_dropout': classifier_dropout,
+                'weight_decay': weight_decay
             }
         }
 
@@ -835,8 +850,11 @@ def spectrogram_trainer_2d(data_path, user_ids,
                 'cosine_scale': cosine_scale,
                 'label_smoothing': label_smoothing,
                 'warmup_epochs': warmup_epochs,
-                'lr_scheduler_type': lr_scheduler_type,  # <-- ADD THIS
-                'random_seed': random_seed  # <-- ADD THIS
+                'lr_scheduler_type': lr_scheduler_type,
+                'random_seed': random_seed,
+                'dropout_rate': dropout_rate,
+                'classifier_dropout': classifier_dropout,
+                'weight_decay': weight_decay
             }
             json.dump(history_json, f, indent=2)
 
@@ -889,7 +907,7 @@ def spectrogram_trainer_2d(data_path, user_ids,
     pe = np.sum(true_counts * pred_counts) / (len(y_true) ** 2)
     kappa_score = (po - pe) / (1 - pe) if pe < 1 else 0.0
 
-    logger.info("=== FINAL SESSION-BASED RESULTS (COSINE CLASSIFIER) ===")
+    logger.info("=== FINAL SESSION-BASED RESULTS (COSINE CLASSIFIER + DROPOUT) ===")
     logger.info(f"Test Loss: {test_loss:.4f}")
     logger.info(f"Test Accuracy: {test_acc:.4f}")
     logger.info(f"Cohen's Kappa: {kappa_score:.4f}")
@@ -928,8 +946,11 @@ def spectrogram_trainer_2d(data_path, user_ids,
             'cosine_scale': cosine_scale,
             'label_smoothing': label_smoothing,
             'warmup_epochs': warmup_epochs,
-            'lr_scheduler_type': lr_scheduler_type,  # <-- ADD THIS
-            'random_seed': random_seed  # <-- ADD THIS
+            'lr_scheduler_type': lr_scheduler_type,
+            'random_seed': random_seed,
+            'dropout_rate': dropout_rate,
+            'classifier_dropout': classifier_dropout,
+            'weight_decay': weight_decay
         }
         results_file = os.path.join(run_checkpoint_dir, 'final_results.json')
         with open(results_file, 'w') as f:
